@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bambu P2S · AMS 2 Pro Filament Manager</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="26" height="26" fill="none">
+            <rect x="2" y="2" width="28" height="28" rx="7" fill="#00AE42" fill-opacity="0.16" stroke="#00AE42" stroke-width="1.8"/>
+            <circle cx="16" cy="16" r="8" stroke="#00AE42" stroke-width="2.6" stroke-dasharray="36 14"/>
+            <circle cx="16" cy="16" r="3" fill="#00AE42"/>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">Bambu Filament Manager</div>
+          <div class="brand-sub" id="printerSubtitle">Bambu Lab P2S · Multi-AMS 2 Pro / AMS HT</div>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" role="tablist">
+        <button class="nav-tab active" data-tab="overview">AMS Rack</button>
+        <button class="nav-tab" data-tab="last-print">Last Print Usage</button>
+        <button class="nav-tab" data-tab="estimator">Future Print Estimator</button>
+        <button class="nav-tab" data-tab="vault">Spool Vault &amp; History</button>
+      </nav>
+
+      <div class="topbar-actions">
+        <button class="status-pill" id="btnPrinterSettings" title="Configure Bambu P2S LAN connection">
+          <span class="status-dot" id="connDot"></span>
+          <span id="connLabel">Offline / Local</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Live P2S Printing Bar (shown when P2S is actively printing) -->
+    <div class="live-print-bar hidden" id="livePrintBar">
+      <div class="live-print-left">
+        <span class="pulse-badge">PRINTING</span>
+        <strong id="liveJobName">Job</strong>
+        <span class="muted" id="liveLayerInfo">Layer 0 / 0</span>
+      </div>
+      <div class="live-print-progress">
+        <div class="progress-track"><div class="progress-fill" id="liveProgressFill" style="width:0%"></div></div>
+        <span class="mono" id="livePercentText">0%</span>
+        <span class="muted mono" id="liveEtaText">--m left</span>
+      </div>
+      <div class="live-print-temps mono">
+        <span id="liveNozzleTemp">N: --°C</span>
+        <span id="liveBedTemp">B: --°C</span>
+        <span id="liveChamberTemp">C: --°C</span>
+        <button class="btn btn-primary btn-xs" id="btnLiveCheckCurrentJob">Estimate</button>
+        <button class="btn btn-secondary btn-xs" id="btnLivePauseResume">Pause</button>
+        <button class="btn btn-danger btn-xs" id="btnLiveStopPrint">Stop</button>
+      </div>
+    </div>
+
+    <!-- Auto-detected Finished Print Banner -->
+    <div class="alert-banner alert-success hidden" id="finishedJobBanner">
+      <div>
+        <strong>Print Finished on P2S:</strong>
+        <span id="finishedJobText"></span>
+      </div>
+      <div class="banner-actions">
+        <button class="btn btn-primary btn-sm" id="btnMeasureFinishedJob">Measure &amp; Deduct Now</button>
+        <button class="btn btn-ghost btn-sm" id="btnDismissFinishedJob">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Sample Data Notice Banner -->
+    <div class="alert-banner alert-info hidden" id="demoBanner">
+      <div>
+        <strong>Sample P2S + 2× AMS 2 Pro + AMS HT data loaded</strong> — try measuring a print or testing the Future Print Estimator right away, or connect your P2S.
+      </div>
+      <div class="banner-actions">
+        <button class="btn btn-primary btn-sm" id="btnBannerConnect">Connect P2S</button>
+        <button class="btn btn-ghost btn-sm" id="btnClearDemo">Start Blank</button>
+      </div>
+    </div>
+
+    <!-- Main Views -->
+    <main class="main-content">
+      <!-- ==================== TAB 1: OVERVIEW & AMS RACK ==================== -->
+      <section class="tab-panel active" id="tab-overview">
+        <!-- Hero Row: Last Print Spotlight + Fleet KPIs -->
+        <div class="hero-grid">
+          <div class="card last-print-card">
+            <div class="card-head">
+              <div>
+                <div class="eyebrow">LAST PRINT MEASUREMENT</div>
+                <h2 id="heroLastTitle">No prints logged yet</h2>
+              </div>
+              <div class="card-head-actions">
+                <button class="btn btn-primary btn-sm" id="btnQuickMeasure">+ Measure Last Print</button>
+                <button class="btn btn-secondary btn-sm" id="btnQuickEstimate">Check Future Print &rarr;</button>
+              </div>
+            </div>
+            <div class="last-print-body" id="heroLastBody">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+          <div class="kpi-column">
+            <div class="card kpi-card">
+              <div class="eyebrow">LOADED FILAMENT</div>
+              <div class="kpi-value mono" id="kpiTotalGrams">0 g</div>
+              <div class="kpi-sub" id="kpiTotalSub">0 spools across 0 AMS units</div>
+            </div>
+            <div class="card kpi-card">
+              <div class="eyebrow">LOW SPOOL ALERTS</div>
+              <div class="kpi-value mono" id="kpiLowCount">0</div>
+              <div class="kpi-sub" id="kpiLowSub">Threshold: &lt; 150 g</div>
+            </div>
+            <div class="card kpi-card">
+              <div class="eyebrow">AMS 2 PRO / HT DRYING</div>
+              <div class="kpi-value mono" id="kpiDryingCount">Idle</div>
+              <div class="kpi-sub" id="kpiDryingSub">No active dry cycles</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AMS Units Header -->
+        <div class="section-header">
+          <div>
+            <h3>Connected AMS Units &amp; Spool Slots</h3>
+            <p class="muted">Track exact net filament grams per slot, compare against Bambu RFID %, or calibrate on a scale.</p>
+          </div>
+          <div class="section-actions">
+            <button class="btn btn-secondary btn-sm" id="btnSyncAms" title="Pull live AMS units &amp; RFID spools from connected P2S">Sync from P2S</button>
+            <button class="btn btn-secondary btn-sm" id="btnAddAmsPro">+ AMS 2 Pro</button>
+            <button class="btn btn-secondary btn-sm" id="btnAddAmsHt">+ AMS HT</button>
+            <button class="btn btn-ghost btn-sm" id="btnAddExternal">+ External Spool</button>
+          </div>
+        </div>
+
+        <!-- Multi-AMS Rack Container -->
+        <div class="ams-rack" id="amsRackContainer">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- ==================== TAB 2: LAST PRINT MEASUREMENT ==================== -->
+      <section class="tab-panel" id="tab-last-print">
+        <div class="two-col-layout">
+          <div class="col-left">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">STEP 1 · IMPORT OR MEASURE</div>
+                  <h3>Measure Filament Used in Last Print</h3>
+                </div>
+              </div>
+
+              <!-- Method A: Drop .gcode.3mf -->
+              <div class="dropzone" id="lastPrintDropzone">
+                <input type="file" id="lastPrintFileInput" accept=".3mf,.gcode" hidden />
+                <div class="dropzone-icon">📦</div>
+                <div class="dropzone-title">Drop sliced <code>.gcode.3mf</code> or <code>.gcode</code> here</div>
+                <div class="dropzone-sub">Reads exact per-color grams, meters, flush weight &amp; preview thumbnail from Bambu Studio / OrcaSlicer</div>
+                <button class="btn btn-secondary btn-sm" type="button" id="btnBrowseLastFile">Browse File</button>
+              </div>
+
+              <!-- Method B: Pull from Bambu Cloud or P2S LAN FTPS -->
+              <div class="subpanel">
+                <div class="subpanel-head">
+                  <div>
+                    <strong id="lastPullTitle">Pull Directly from Bambu Cloud</strong>
+                    <div class="muted small" id="lastPullSub">Fetches your latest print job's exact grams, meters &amp; AMS mapping from Bambu Cloud</div>
+                  </div>
+                  <div class="btn-row">
+                    <button class="btn btn-primary btn-sm" id="btnFtpsPullLatest">Pull Latest Print</button>
+                    <button class="btn btn-secondary btn-sm" id="btnFtpsBrowse">Browse History</button>
+                    <button class="btn btn-ghost btn-sm" id="btnLocalSlicerLast" title="Read latest sliced plate directly from Bambu Studio / OrcaSlicer cache on this PC">From Bambu Studio</button>
+                  </div>
+                </div>
+                <div id="ftpsFileList" class="ftps-list hidden"></div>
+              </div>
+
+              <!-- Method C: Manual / Kitchen Scale Delta -->
+              <div class="subpanel">
+                <div class="subpanel-head">
+                  <strong>Or Enter Usage Manually / From Scale</strong>
+                  <button class="btn btn-ghost btn-sm" id="btnStartManualLast">+ Manual Entry</button>
+                </div>
+                <div id="manualLastForm" class="manual-box hidden">
+                  <div class="form-row">
+                    <label>Print Name
+                      <input type="text" id="manualLastName" placeholder="e.g., Gridfinity Bin 2x3" />
+                    </label>
+                  </div>
+                  <div id="manualLastRows"></div>
+                  <div class="btn-row" style="margin-top:10px;">
+                    <button class="btn btn-secondary btn-sm" type="button" id="btnAddManualLastRow">+ Add Color / Slot</button>
+                    <button class="btn btn-primary btn-sm" type="button" id="btnApplyManualLast">Preview Deduction &rarr;</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-right">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">STEP 2 · VERIFY &amp; DEDUCT</div>
+                  <h3>Last Print Breakdown</h3>
+                </div>
+              </div>
+              <div id="lastPrintPreview">
+                <div class="empty-state">
+                  <p>Drop a <code>.gcode.3mf</code> file, pull the latest print from your P2S, or enter manual grams on the left.</p>
+                  <p class="muted small">We will auto-match each filament color to your AMS 2 Pro / AMS HT slots and show exact <strong>Before &rarr; After</strong> remaining weight before deducting.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 3: FUTURE PRINT ESTIMATOR ==================== -->
+      <section class="tab-panel" id="tab-estimator">
+        <div class="two-col-layout">
+          <div class="col-left">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">FUTURE PRINT CHECKER</div>
+                  <h3>Will My Loaded Spools Finish This Print?</h3>
+                </div>
+              </div>
+
+              <div class="dropzone" id="futurePrintDropzone">
+                <input type="file" id="futurePrintFileInput" accept=".3mf,.gcode" hidden />
+                <div class="dropzone-icon">🧮</div>
+                <div class="dropzone-title">Drop your upcoming sliced <code>.gcode.3mf</code></div>
+                <div class="dropzone-sub">Checks every color against your AMS 2 Pro &amp; AMS HT balances + auto-detects AMS Auto-Refill backup spools</div>
+                <button class="btn btn-secondary btn-sm" type="button" id="btnBrowseFutureFile">Browse File</button>
+              </div>
+
+              <!-- Pull Current / Queued Job Directly from Bambu Cloud or P2S LAN -->
+              <div class="subpanel">
+                <div class="subpanel-head">
+                  <div>
+                    <strong id="estPullTitle">Check Current / Recent Job from Bambu Cloud</strong>
+                    <div class="muted small" id="estPullSub">Fetches the active or latest print task from Bambu Cloud to estimate filament needed</div>
+                  </div>
+                  <div class="btn-row">
+                    <button class="btn btn-primary btn-sm" id="btnEstCheckCurrentJob">Check Current P2S Job</button>
+                    <button class="btn btn-secondary btn-sm" id="btnEstFtpsBrowse">Browse Jobs</button>
+                    <button class="btn btn-ghost btn-sm" id="btnLocalSlicerEst" title="Check latest sliced plate directly from Bambu Studio / OrcaSlicer cache on this PC">From Bambu Studio</button>
+                  </div>
+                </div>
+                <div id="estFtpsFileList" class="ftps-list hidden"></div>
+              </div>
+
+              <!-- Quick Manual Future Estimator -->
+              <div class="subpanel">
+                <div class="subpanel-head">
+                  <strong>Quick Manual Grams Check</strong>
+                  <button class="btn btn-secondary btn-sm" id="btnAddFutureRow">+ Add Filament</button>
+                </div>
+                <div id="futureManualRows"></div>
+              </div>
+
+              <!-- Safety Margin Controls -->
+              <div class="subpanel">
+                <div class="subpanel-head">
+                  <strong>Safety Margin (Purge / Spool-End Buffer)</strong>
+                </div>
+                <div class="buffer-grid">
+                  <label>Fixed Buffer (g)
+                    <input type="number" id="estBufferG" min="0" max="200" step="1" value="15" />
+                  </label>
+                  <label>Percentage Buffer (%)
+                    <input type="number" id="estBufferPct" min="0" max="50" step="1" value="5" />
+                  </label>
+                  <label class="checkbox-inline">
+                    <input type="checkbox" id="estIncludeAutoRefill" checked />
+                    <span>Check AMS Auto-Refill backup slots</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-right">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">FEASIBILITY VERDICT</div>
+                  <h3>Remaining Filament Forecast</h3>
+                </div>
+              </div>
+              <div id="futureResultContainer">
+                <div class="empty-state">
+                  <p>Drop a sliced <code>.gcode.3mf</code> or add manual gram requirements on the left.</p>
+                  <p class="muted small">You'll see a per-slot Go / Tight / Insufficient verdict, projected leftover grams after printing, and whether an AMS Auto-Refill backup spool can cover a shortfall.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 4: SPOOL VAULT & HISTORY ==================== -->
+      <section class="tab-panel" id="tab-vault">
+        <div class="card" style="margin-bottom: 18px;">
+          <div class="card-head">
+            <div>
+              <div class="eyebrow">UNLOADED / SHELF INVENTORY</div>
+              <h3>Spool Vault</h3>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btnNewVaultSpool">+ Add Spool</button>
+          </div>
+          <div id="vaultSpoolsContainer" class="vault-grid"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="eyebrow">AUDIT LOG</div>
+              <h3>Print History &amp; Filament Deductions</h3>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-ghost btn-sm" id="btnLoadSampleData">Load Sample Data</button>
+            </div>
+          </div>
+          <div id="historyContainer" class="history-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ==================== MODAL: BAMBU CLOUD / LAN SETTINGS ==================== -->
+  <div class="modal-backdrop hidden" id="modalSettings">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h3>Bambu Lab P2S · Connection &amp; Settings</h3>
+        <button class="icon-btn" data-close-modal="modalSettings">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="conn-status-box" id="settingsConnBox">
+          <div>
+            <strong id="settingsConnTitle">Not connected</strong>
+            <div class="muted small" id="settingsConnDetail">Sign in to Bambu Cloud below to stream live AMS 2 Pro / AMS HT telemetry and pull print history.</div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary btn-sm" id="btnModalConnect">Connect</button>
+            <button class="btn btn-secondary btn-sm" id="btnModalDisconnect">Disconnect</button>
+            <button class="btn btn-ghost btn-sm" id="btnModalTestFtps">Test Connection</button>
+          </div>
+        </div>
+
+        <!-- Connection Type Switcher -->
+        <div class="form-row">
+          <label>Connection Type
+            <select id="cfgConnectionMode">
+              <option value="cloud">Bambu Cloud (Recommended — no LAN-only mode needed)</option>
+              <option value="lan">Local LAN Mode (Direct IP + Access Code)</option>
+            </select>
+          </label>
+        </div>
+
+        <!-- Bambu Cloud Fields -->
+        <div id="cloudSettingsSection" class="subpanel" style="margin-top:0;padding-top:12px;">
+          <div class="form-grid-2">
+            <label>Bambu Cloud Region
+              <select id="cfgCloudRegion">
+                <option value="global">Global (us.mqtt.bambulab.com)</option>
+                <option value="cn">China Mainland (cn.mqtt.bambulab.com)</option>
+              </select>
+            </label>
+            <label>Bambu Lab Account Email
+              <input type="text" id="cfgCloudEmail" placeholder="you@example.com" />
+            </label>
+            <label>Account Password
+              <input type="password" id="cfgCloudPassword" placeholder="Used only to obtain token" />
+            </label>
+            <label>Email Verification Code (if prompted)
+              <input type="text" id="cfgCloudVerifyCode" placeholder="6-digit code from email" />
+            </label>
+          </div>
+          <div class="btn-row" style="margin-top:10px;justify-content:space-between;">
+            <button class="btn btn-primary btn-sm" type="button" id="btnCloudSignIn">Sign In to Bambu Cloud</button>
+            <button class="btn btn-secondary btn-sm" type="button" id="btnCloudRefreshDevices">Refresh Bound Printers</button>
+          </div>
+          <div id="cloudDevicePickerRow" class="form-row hidden" style="margin-top:10px;">
+            <label>Select Printer from Your Bambu Account
+              <select id="cfgCloudDeviceSelect"></select>
+            </label>
+          </div>
+          <details class="setup-guide" style="margin-top:10px;">
+            <summary>Advanced: Paste Bambu Cloud Access Token &amp; UID directly (Cloud MQTT)</summary>
+            <div class="form-grid-2" style="margin-top:8px;">
+              <label>Bearer Access Token
+                <input type="password" id="cfgCloudToken" placeholder="AQAt... or eyJhbGciOi..." />
+              </label>
+              <label>Bambu Numeric User ID (UID)
+                <input type="text" id="cfgCloudUid" placeholder="e.g., 1234567890 (for u_UID MQTT)" />
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <!-- Local LAN Fields (hidden when Cloud mode is selected) -->
+        <div id="lanSettingsSection" class="form-grid-2 hidden" style="margin-top:10px;">
+          <label>Printer IP Address (LAN)
+            <input type="text" id="cfgPrinterIp" placeholder="192.168.1.120" />
+          </label>
+          <label>LAN Access Code (8 chars)
+            <input type="password" id="cfgAccessCode" placeholder="e.g., 12345678" />
+          </label>
+        </div>
+
+        <!-- Shared Printer & Buffer Settings -->
+        <div class="form-grid-2" style="margin-top:12px;">
+          <label>Printer Name
+            <input type="text" id="cfgPrinterName" placeholder="My P2S" />
+          </label>
+          <label>Printer Serial Number (SN)
+            <input type="text" id="cfgPrinterSerial" placeholder="Auto-filled on Cloud sign-in" />
+          </label>
+          <label>Printer Model
+            <input type="text" id="cfgPrinterModel" value="Bambu Lab P2S" />
+          </label>
+          <label>Low Spool Warning (g)
+            <input type="number" id="cfgLowWarnG" min="10" max="500" value="150" />
+          </label>
+          <label>Default Safety Buffer (g)
+            <input type="number" id="cfgSafetyG" min="0" max="200" value="15" />
+          </label>
+          <label>Default Safety Buffer (%)
+            <input type="number" id="cfgSafetyPct" min="0" max="50" value="5" />
+          </label>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="checkbox-inline">
+            <input type="checkbox" id="cfgAutoConnect" />
+            <span>Auto-connect to P2S on startup</span>
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="cfgAutoSyncRfid" checked />
+            <span>Sync live AMS 2 Pro / AMS HT slots &amp; RFID changes automatically</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-foot modal-foot-between">
+        <button class="btn btn-danger btn-sm" id="btnShutdownServer" title="Stop the local Filament Manager server">Exit App</button>
+        <div class="btn-row">
+          <button class="btn btn-ghost" data-close-modal="modalSettings">Cancel</button>
+          <button class="btn btn-primary" id="btnSaveSettings">Save &amp; Connect</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL: EDIT / ADD SPOOL ==================== -->
+  <div class="modal-backdrop hidden" id="modalSpool">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modalSpoolTitle">Edit Spool</h3>
+        <button class="icon-btn" data-close-modal="modalSpool">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="spId" />
+        <div class="form-grid-2">
+          <label>Assigned Slot
+            <select id="spSlotKey"></select>
+          </label>
+          <label>Material
+            <select id="spMaterial">
+              <option value="PLA">PLA (1.24 g/cm³)</option>
+              <option value="PLA-CF">PLA-CF (1.22 g/cm³)</option>
+              <option value="PETG">PETG (1.27 g/cm³)</option>
+              <option value="PETG-CF">PETG-CF (1.25 g/cm³)</option>
+              <option value="ABS">ABS (1.05 g/cm³)</option>
+              <option value="ASA">ASA (1.07 g/cm³)</option>
+              <option value="TPU">TPU (1.21 g/cm³)</option>
+              <option value="PA-CF">PA-CF / PA6-CF (1.18 g/cm³)</option>
+              <option value="PAHT-CF">PAHT-CF (1.18 g/cm³)</option>
+              <option value="PC">PC (1.20 g/cm³)</option>
+              <option value="PVA">PVA Support (1.23 g/cm³)</option>
+              <option value="Support">Support W/G (1.24 g/cm³)</option>
+            </select>
+          </label>
+          <label>Brand
+            <input type="text" id="spBrand" placeholder="Bambu Lab, Polymaker, Sunlu..." />
+          </label>
+          <label>Spool / Color Name
+            <input type="text" id="spName" placeholder="e.g., PLA Basic Matte Charcoal" />
+          </label>
+          <label>Color
+            <div class="color-picker-row">
+              <input type="color" id="spColorPicker" value="#00AE42" />
+              <input type="text" id="spColorHex" value="#00AE42" maxlength="7" />
+            </div>
+          </label>
+          <label>Spool Tare Preset (Empty Spool g)
+            <select id="spTarePreset">
+              <option value="250">Bambu Reusable Plastic (250g)</option>
+              <option value="255">Bambu High-Temp Spool (255g)</option>
+              <option value="140">Cardboard / Polymaker (140g)</option>
+              <option value="130">Sunlu Reusable Plastic (130g)</option>
+              <option value="190">eSUN / Generic Plastic (190g)</option>
+              <option value="custom">Custom...</option>
+            </select>
+          </label>
+          <label>Initial Net Filament (g)
+            <input type="number" id="spInitialG" min="50" max="5000" step="10" value="1000" />
+          </label>
+          <label>Remaining Net Filament (g)
+            <input type="number" id="spRemainingG" min="0" max="5000" step="0.5" value="1000" />
+          </label>
+          <label>Empty Spool Tare (g)
+            <input type="number" id="spTareG" min="0" max="1000" step="1" value="250" />
+          </label>
+          <label>Price per kg ($)
+            <input type="number" id="spCostKg" min="0" max="500" step="0.5" value="19.99" />
+          </label>
+        </div>
+        <label style="margin-top:10px;display:block;">Notes
+          <input type="text" id="spNotes" placeholder="e.g., Dried 6h at 55°C, Auto-refill pair..." />
+        </label>
+        <div class="checkbox-row" style="margin-top:10px;">
+          <label class="checkbox-inline">
+            <input type="checkbox" id="spIsRfid" />
+            <span>Official Bambu RFID Spool</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-foot modal-foot-between">
+        <button class="btn btn-danger hidden" id="btnDeleteSpool">Delete Spool</button>
+        <div class="btn-row">
+          <button class="btn btn-ghost" data-close-modal="modalSpool">Cancel</button>
+          <button class="btn btn-primary" id="btnSaveSpool">Save Spool</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL: SCALE WEIGH CALIBRATION ==================== -->
+  <div class="modal-backdrop hidden" id="modalWeigh">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h3>Scale Calibration</h3>
+        <button class="icon-btn" data-close-modal="modalWeigh">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="weighSpoolId" />
+        <p class="muted" id="weighSpoolLabel">Weigh spool on kitchen scale to lock in exact remaining filament.</p>
+        <div class="form-row">
+          <label>Gross Weight on Scale (Spool + Filament, in grams)
+            <input type="number" id="weighGrossG" min="0" max="6000" step="0.5" placeholder="e.g., 892" />
+          </label>
+        </div>
+        <div class="form-row">
+          <label>Empty Spool Tare Weight (g)
+            <input type="number" id="weighTareG" min="0" max="1000" step="1" value="250" />
+          </label>
+        </div>
+        <div class="weigh-preview">
+          <span>Calculated Net Filament Remaining:</span>
+          <strong class="mono" id="weighNetPreview">-- g</strong>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modalWeigh">Cancel</button>
+        <button class="btn btn-primary" id="btnApplyWeigh">Update Remaining Grams</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

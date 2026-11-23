@@ -1,0 +1,16 @@
+# Local user database (contains private printer IP, serial, access code, and cloud token)
+data/
+*.db
+*.sqlite
+
+# Staged print files & temporary artifacts
+*.3mf
+*.gcode
+*.log
+*.tmp
+
+# OS / Editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
