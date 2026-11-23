@@ -226,7 +226,8 @@ function To-List($val) {
     if ($null -ne $val) {
         foreach ($item in $val) { [void]$list.Add($item) }
     }
-    return $list
+    # Unary comma prevents PowerShell from unrolling the ArrayList into a fixed-size object[]
+    return ,$list
 }
 
 function Test-IsSampleSpool($sp) {
