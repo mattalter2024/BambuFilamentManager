@@ -4,6 +4,19 @@ A zero-install Windows web dashboard for tracking filament usage across multiple
 
 ---
 
+## Screenshots
+
+### Multi-AMS 2 Pro / AMS HT Rack & Last Print Summary
+![AMS Rack Dashboard](docs/screenshots/ams-rack.png)
+
+### Last Print Usage Measurement (`.gcode.3mf` Breakdown & Deduction)
+![Last Print Usage Measurement](docs/screenshots/last-print.png)
+
+### Future Print Estimator ("Will It Fit?"), AMS Auto-Refill Check & Print Submission
+![Future Print Estimator and P2S Print Submission](docs/screenshots/future-estimator.png)
+
+---
+
 ## Features
 
 - **Zero-Install Windows Runtime:** Runs locally using built-in Windows PowerShell, .NET, and `curl.exe` — no Python, Node.js, or external packages required.

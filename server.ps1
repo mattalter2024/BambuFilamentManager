@@ -1,13 +1,14 @@
 ﻿param(
     [int]$Port = 8765,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [string]$CustomDataDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $RootDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WebDir     = Join-Path $RootDir "web"
-$DataDir    = Join-Path $RootDir "data"
+$DataDir    = if (-not [string]::IsNullOrWhiteSpace($CustomDataDir)) { $CustomDataDir } else { Join-Path $RootDir "data" }
 $UploadsDir = Join-Path $DataDir "uploads"
 $DbPath     = Join-Path $DataDir "filament_db.json"
 $CsPath     = Join-Path $RootDir "BambuEngine.cs"
@@ -389,10 +390,15 @@ function Sync-LiveTelemetryIntoDb($db, $snap) {
     return $changed
 }
 
+function Test-HasKey($dict, [string]$key) {
+    if ($null -eq $dict) { return $false }
+    return ($dict.Keys -contains $key)
+}
+
 function Connect-ConfiguredPrinter($cfg) {
-    $mode = if ($cfg.ContainsKey("connectionMode") -and -not [string]::IsNullOrWhiteSpace($cfg["connectionMode"])) { [string]$cfg["connectionMode"] } else { "cloud" }
+    $mode = if ((Test-HasKey $cfg "connectionMode") -and -not [string]::IsNullOrWhiteSpace($cfg["connectionMode"])) { [string]$cfg["connectionMode"] } else { "lan" }
     if ($mode -eq "cloud") {
-        $region = if ($cfg.ContainsKey("cloudRegion") -and -not [string]::IsNullOrWhiteSpace($cfg["cloudRegion"])) { [string]$cfg["cloudRegion"] } else { "global" }
+        $region = if ((Test-HasKey $cfg "cloudRegion") -and -not [string]::IsNullOrWhiteSpace($cfg["cloudRegion"])) { [string]$cfg["cloudRegion"] } else { "global" }
         $MqttClient.ConfigureAndConnectCloud($region, [string]$cfg["cloudUid"], [string]$cfg["cloudToken"], [string]$cfg["printerSerial"])
     } else {
         $MqttClient.ConfigureAndConnect([string]$cfg["printerIp"], [string]$cfg["printerSerial"], [string]$cfg["accessCode"])
@@ -401,11 +407,11 @@ function Connect-ConfiguredPrinter($cfg) {
 
 # Load Database & Ensure Cloud Config Fields Exist
 $Db = Load-Database
-if (-not $Db["config"].ContainsKey("connectionMode")) { $Db["config"]["connectionMode"] = "cloud"; Save-Database $Db }
-if (-not $Db["config"].ContainsKey("cloudRegion"))    { $Db["config"]["cloudRegion"] = "global" }
-if (-not $Db["config"].ContainsKey("cloudEmail"))     { $Db["config"]["cloudEmail"] = "" }
-if (-not $Db["config"].ContainsKey("cloudUid"))       { $Db["config"]["cloudUid"] = "" }
-if (-not $Db["config"].ContainsKey("cloudToken"))     { $Db["config"]["cloudToken"] = "" }
+if (-not (Test-HasKey $Db["config"] "connectionMode")) { $Db["config"]["connectionMode"] = "lan"; Save-Database $Db }
+if (-not (Test-HasKey $Db["config"] "cloudRegion"))    { $Db["config"]["cloudRegion"] = "global" }
+if (-not (Test-HasKey $Db["config"] "cloudEmail"))     { $Db["config"]["cloudEmail"] = "" }
+if (-not (Test-HasKey $Db["config"] "cloudUid"))       { $Db["config"]["cloudUid"] = "" }
+if (-not (Test-HasKey $Db["config"] "cloudToken"))     { $Db["config"]["cloudToken"] = "" }
 
 if ($Db["config"]["autoConnect"]) {
     $m = [string]$Db["config"]["connectionMode"]
