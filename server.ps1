@@ -727,6 +727,7 @@ try {
                     Send-Json $res ([ordered]@{ ok = $false; error = "Empty file uploaded." }) 400
                 } else {
                     # Stage file locally so user can submit it directly to P2S without re-uploading
+                    if (-not (Test-Path $UploadsDir)) { New-Item -ItemType Directory -Path $UploadsDir -Force | Out-Null }
                     $stagedId = [Guid]::NewGuid().ToString("N").Substring(0, 10) + "_" + $safeName
                     $stagedPath = Join-Path $UploadsDir $stagedId
                     [System.IO.File]::WriteAllBytes($stagedPath, $bytes)

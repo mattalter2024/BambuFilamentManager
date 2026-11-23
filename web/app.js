@@ -274,16 +274,17 @@
     const gState = String(tel.GcodeState || "").toUpperCase();
     if (tel.Connected && (gState === "RUNNING" || gState === "PREPARE" || gState === "PAUSE")) {
       liveBar.classList.remove("hidden");
+      $("liveStateBadge").textContent = gState;
       $("liveJobName").textContent = tel.SubtaskName || tel.GcodeFile || "Active Print";
       $("liveLayerInfo").textContent = `Layer ${tel.LayerNum || 0} / ${tel.TotalLayerNum || 0}`;
       $("liveProgressFill").style.width = `${Math.min(100, Math.max(0, tel.McPercent || 0))}%`;
       $("livePercentText").textContent = `${tel.McPercent || 0}%`;
       $("liveEtaText").textContent = `${tel.RemainingMinutes || 0}m left`;
-      $("liveNozzleTemp").textContent = `N: ${Math.round(tel.NozzleTemp || 0)}°C`;
-      $("liveBedTemp").textContent = `B: ${Math.round(tel.BedTemp || 0)}°C`;
-      $("liveChamberTemp").textContent = `C: ${Math.round(tel.ChamberTemp || 0)}°C`;
+      $("liveNozzleTemp").textContent = `N ${Math.round(tel.NozzleTemp || 0)}°`;
+      $("liveBedTemp").textContent = `B ${Math.round(tel.BedTemp || 0)}°`;
+      $("liveChamberTemp").textContent = `C ${Math.round(tel.ChamberTemp || 0)}°`;
       const prBtn = $("btnLivePauseResume");
-      if (prBtn) prBtn.textContent = gState === "PAUSE" ? "Resume" : "Pause";
+      if (prBtn) prBtn.textContent = gState === "PAUSE" ? "▶ Resume Print" : "⏸ Pause Print";
     } else {
       liveBar.classList.add("hidden");
     }
@@ -339,22 +340,28 @@
     }
   }
 
-  // ==================== HERO & KPIs ====================
+  // ==================== COMPACT MONITOR STRIP & KPI CHIPS ====================
   function renderHero() {
     const history = (state.db?.history || []).filter(h => !h.undone);
     const last = history[0] || null;
     const cfg = state.db?.config || {};
     const warnThreshold = Number(cfg.lowSpoolWarnG || 150);
 
+    const metricEl = $("heroLastMetric");
+    const toggleBtn = $("btnToggleLastDetails");
+    const drawer = $("lastDetailsDrawer");
+
     if (!last) {
-      $("heroLastTitle").textContent = "No prints measured yet";
-      $("heroLastBody").innerHTML = `
-        <div class="empty-state" style="width:100%;padding:12px 0;">
-          <p style="margin:0 0 6px;">Measure your last print by pulling it from your P2S or dropping a sliced <code>.gcode.3mf</code> file.</p>
-          <p class="muted small" style="margin:0;">Once logged, your exact remaining filament per AMS 2 Pro slot updates automatically.</p>
-        </div>`;
+      $("heroLastTitle").textContent = "No prints logged yet";
+      metricEl.textContent = "";
+      toggleBtn.classList.add("hidden");
+      drawer.classList.add("hidden");
+      $("heroLastBody").innerHTML = "";
     } else {
       $("heroLastTitle").textContent = last.plateName || last.fileName || "Last Print";
+      metricEl.textContent = `${fmtG(last.totalGrams)} g · ${Number(last.totalMeters || 0).toFixed(1)} m · ${fmtRelativeTime(last.timestampUtc)}`;
+      toggleBtn.classList.remove("hidden");
+
       const thumbHtml = last.thumbnailBase64
         ? `<img src="${last.thumbnailBase64}" alt="Plate preview" />`
         : `<span>🖨️</span>`;
@@ -373,67 +380,62 @@
       }).join("");
 
       $("heroLastBody").innerHTML = `
-        <div class="last-print-thumb">${thumbHtml}</div>
+        <div class="last-print-thumb" style="width:72px;height:72px;">${thumbHtml}</div>
         <div style="flex:1;min-width:0;">
-          <div class="last-print-metrics">
+          <div class="last-print-metrics" style="margin-bottom:8px;">
             <div>
               <div class="lp-metric-label">Filament Used</div>
-              <div class="lp-metric-val accent mono">${fmtG(last.totalGrams)} g</div>
+              <div class="lp-metric-val accent mono" style="font-size:18px;">${fmtG(last.totalGrams)} g</div>
             </div>
             <div>
-              <div class="lp-metric-label">Length Used</div>
-              <div class="lp-metric-val mono">${Number(last.totalMeters || 0).toFixed(1)} m</div>
+              <div class="lp-metric-label">Length</div>
+              <div class="lp-metric-val mono" style="font-size:18px;">${Number(last.totalMeters || 0).toFixed(1)} m</div>
             </div>
             ${Number(last.flushGrams || 0) > 0 ? `
             <div>
-              <div class="lp-metric-label">Purge / Flush</div>
-              <div class="lp-metric-val mono">${fmtG(last.flushGrams)} g</div>
+              <div class="lp-metric-label">Flush</div>
+              <div class="lp-metric-val mono" style="font-size:18px;">${fmtG(last.flushGrams)} g</div>
             </div>` : ""}
-            <div>
-              <div class="lp-metric-label">Logged</div>
-              <div class="lp-metric-val" style="font-size:15px;padding-top:5px;">${fmtRelativeTime(last.timestampUtc)} <span class="muted small">(${last.completionPct || 100}%)</span></div>
-            </div>
           </div>
           <div class="slot-usage-chips">${chipsHtml}</div>
         </div>`;
     }
 
-    // Fleet KPIs
+    // Inline KPI chips (shown quietly only when relevant)
     const loaded = getLoadedSpools();
     const totalG = loaded.reduce((acc, s) => acc + Number(s.remainingGrams || 0), 0);
     const lowSpools = loaded.filter(s => Number(s.remainingGrams || 0) <= warnThreshold);
     const dryingUnits = (state.db?.amsUnits || []).filter(u => Number(u.dryTimeMinutes || 0) > 0);
 
-    $("kpiTotalGrams").textContent = `${Math.round(totalG).toLocaleString()} g`;
-    $("kpiTotalSub").textContent = `${(totalG / 1000).toFixed(2)} kg across ${loaded.length} loaded spool(s)`;
+    $("kpiTotalGrams").textContent = totalG >= 1000 ? `${(totalG / 1000).toFixed(2)} kg` : `${Math.round(totalG)} g`;
+    $("kpiTotalSub").textContent = `(${loaded.length} spools)`;
 
-    const kLow = $("kpiLowCount");
-    kLow.textContent = lowSpools.length > 0 ? `${lowSpools.length} spool${lowSpools.length > 1 ? "s" : ""}` : "All Good";
-    kLow.className = "kpi-value mono " + (lowSpools.length > 0 ? "warn" : "accent");
-    $("kpiLowSub").textContent = lowSpools.length > 0
-      ? `Low: ${lowSpools.map(s => `${s.slotKey} (${fmtG(s.remainingGrams)}g)`).join(", ")}`
-      : `All spools above ${warnThreshold} g`;
-
-    const kDry = $("kpiDryingCount");
-    if (dryingUnits.length > 0) {
-      kDry.textContent = `${dryingUnits.length} Active`;
-      kDry.className = "kpi-value mono warn";
-      $("kpiDryingSub").textContent = dryingUnits.map(u => `${u.label}: ${fmtDuration(u.dryTimeMinutes * 60)} left`).join(" · ");
+    const lowChip = $("kpiLowChip");
+    if (lowSpools.length > 0) {
+      lowChip.classList.remove("hidden");
+      lowChip.classList.add("warn");
+      $("kpiLowCount").textContent = `⚠ ${lowSpools.length} low (${lowSpools.map(s => s.slotKey).join(", ")})`;
     } else {
-      kDry.textContent = "Standby";
-      kDry.className = "kpi-value mono";
-      $("kpiDryingSub").textContent = `${(state.db?.amsUnits || []).length} unit(s) monitored`;
+      lowChip.classList.add("hidden");
+    }
+
+    const dryChip = $("kpiDryingChip");
+    if (dryingUnits.length > 0) {
+      dryChip.classList.remove("hidden");
+      $("kpiDryingCount").textContent = `🔥 ${dryingUnits.length} drying`;
+    } else {
+      dryChip.classList.add("hidden");
     }
   }
 
-  // ==================== AMS RACK ====================
+  // ==================== AMS RACK (CLEAN MONITORING CARDS) ====================
   function renderAmsRack() {
     const container = $("amsRackContainer");
     const units = state.db?.amsUnits || [];
     const warnThreshold = Number(state.db?.config?.lowSpoolWarnG || 150);
 
     if (units.length === 0) {
-      container.innerHTML = `<div class="card empty-state">No AMS units configured yet. Click <strong>+ AMS 2 Pro</strong> or <strong>Sync from P2S</strong> above.</div>`;
+      container.innerHTML = `<div class="card empty-state">No AMS units configured yet. Open <strong>Menu &#9662;</strong> above to sync from your P2S or add an AMS 2 Pro unit.</div>`;
       return;
     }
 
@@ -443,15 +445,17 @@
       const isExt = unit.unitType === "External";
       const badgeClass = isHt ? "ht" : isExt ? "ext" : "";
 
-      const envHtml = !isExt ? `
+      const envHtml = `
         <div class="ams-env-badges">
-          ${Number(unit.tempC || 0) > 0 ? `<span class="env-pill mono">🌡 ${Number(unit.tempC).toFixed(1)}°C</span>` : ""}
-          ${Number(unit.humidityRaw || 0) > 0 ? `<span class="env-pill mono">💧 ${unit.humidityRaw}% RH</span>` : (Number(unit.humidityLevel || 0) > 0 ? `<span class="env-pill">💧 Level ${unit.humidityLevel}/5</span>` : "")}
-          ${Number(unit.dryTimeMinutes || 0) > 0 ? `<span class="env-pill drying mono">🔥 Drying · ${fmtDuration(unit.dryTimeMinutes * 60)} left</span>` : ""}
-          <button class="btn btn-ghost btn-xs" data-remove-unit="${esc(unit.id)}" title="Remove unit">Remove</button>
-        </div>` : `
-        <div class="ams-env-badges">
-          <button class="btn btn-ghost btn-xs" data-remove-unit="${esc(unit.id)}">Remove</button>
+          ${!isExt && Number(unit.tempC || 0) > 0 ? `<span class="env-pill mono">${Number(unit.tempC).toFixed(1)}°C</span>` : ""}
+          ${!isExt && Number(unit.humidityRaw || 0) > 0 ? `<span class="env-pill mono">${unit.humidityRaw}% RH</span>` : (!isExt && Number(unit.humidityLevel || 0) > 0 ? `<span class="env-pill">RH ${unit.humidityLevel}/5</span>` : "")}
+          ${!isExt && Number(unit.dryTimeMinutes || 0) > 0 ? `<span class="env-pill drying mono">🔥 Drying · ${fmtDuration(unit.dryTimeMinutes * 60)}</span>` : ""}
+          <div class="menu-wrap">
+            <button class="slot-dots-btn" data-toggle-menu="unit-menu-${esc(unit.id)}" title="Unit options">&hellip;</button>
+            <div class="dropdown-menu compact hidden" id="unit-menu-${esc(unit.id)}">
+              <button class="menu-item danger" data-remove-unit="${esc(unit.id)}">Remove ${esc(unit.label)}</button>
+            </div>
+          </div>
         </div>`;
 
       const slotsHtml = slotKeys.map(sk => {
@@ -459,9 +463,9 @@
         if (!sp) {
           return `
             <div class="slot-card empty-slot">
-              <div class="slot-key">${esc(sk)}</div>
-              <div class="muted small">Empty Slot</div>
-              <button class="btn btn-secondary btn-xs" data-add-to-slot="${esc(sk)}">+ Load Spool</button>
+              <div class="slot-key mono">${esc(sk)}</div>
+              <div class="muted small">Empty</div>
+              <button class="btn btn-ghost btn-xs" data-add-to-slot="${esc(sk)}">+ Load</button>
             </div>`;
         }
 
@@ -474,7 +478,7 @@
         const barClass = isCritical ? "danger" : isLow ? "warn" : "";
         const gramsClass = isCritical ? "critical" : isLow ? "low" : "";
 
-        // Check if this slot is actively feeding the P2S nozzle right now
+        // Check if actively feeding nozzle
         const activeTrayRaw = String(state.telemetry?.ActiveTrayNow ?? "");
         let isActiveInNozzle = false;
         if (activeTrayRaw && activeTrayRaw !== "255" && activeTrayRaw !== "254") {
@@ -487,25 +491,41 @@
           }
         }
 
-        const profileSub = [sp.trayInfoIdx, sp.nozzleTempRange].filter(Boolean).join(" · ");
+        // Show only the single most useful right-hand status badge (no noise)
+        let rightBadge = "";
+        if (sp.needsWeightInit) {
+          rightBadge = `<button class="slot-set-weight-btn" data-weigh-spool="${esc(sp.id)}" title="Weigh on scale to set starting grams">Set Weight</button>`;
+        } else if (Number(sp.lastPrintUsedG || 0) > 0) {
+          rightBadge = `<span class="last-used-tag mono" title="Used in last logged print">-${fmtG(sp.lastPrintUsedG)}g</span>`;
+        } else if (Number(sp.rfidRemainPct) >= 0) {
+          rightBadge = `<span class="rfid-tag mono" title="Bambu RFID estimate">RFID ${sp.rfidRemainPct}%</span>`;
+        }
 
+        const menuId = `slot-menu-${esc(sp.id)}`;
         return `
           <div class="slot-card ${isLow ? "low-spool" : ""}" style="${isActiveInNozzle ? "border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-soft);" : ""}">
             <div class="slot-top">
               <div style="display:flex;align-items:center;gap:6px;">
                 <span class="slot-key mono">${esc(sk)}</span>
+                <span class="mat-pill">${esc(sp.material || "PLA")}</span>
                 ${isActiveInNozzle ? `<span class="pulse-badge">ACTIVE</span>` : ""}
               </div>
-              <span class="mat-pill">${esc(sp.material || "PLA")}</span>
+              <div class="menu-wrap">
+                <button class="slot-dots-btn" data-toggle-menu="${menuId}" title="Spool actions">&hellip;</button>
+                <div class="dropdown-menu compact hidden" id="${menuId}">
+                  <button class="menu-item" data-weigh-spool="${esc(sp.id)}">⚖ Weigh on Scale</button>
+                  <button class="menu-item" data-edit-spool="${esc(sp.id)}">✎ Edit Spool</button>
+                  <button class="menu-item" data-unload-spool="${esc(sp.id)}">📦 Move to Vault</button>
+                </div>
+              </div>
             </div>
 
             <div class="slot-visual-row">
               ${buildSpoolSvg(sp.color || "#64748b", pct)}
               <div class="slot-grams-block">
                 <div class="slot-grams-main mono ${gramsClass}">${fmtG(remG)} g</div>
-                <div class="slot-meters mono">~${meters.toFixed(1)} m · ${pct}%</div>
                 <div class="slot-name" title="${esc(sp.name)}">${esc(sp.name || sp.material)}</div>
-                <div class="slot-brand mono">${esc(profileSub || sp.brand || "")}</div>
+                <div class="slot-meters mono">${pct}% · ~${meters.toFixed(0)} m</div>
               </div>
             </div>
 
@@ -513,16 +533,7 @@
               <div class="progress-fill ${barClass}" style="width:${pct}%"></div>
             </div>
 
-            <div class="slot-meta-row">
-              ${Number(sp.rfidRemainPct) >= 0 ? `<span class="rfid-tag mono" title="AMS optical RFID estimate">RFID ${sp.rfidRemainPct}%</span>` : (sp.needsWeightInit ? `<span class="env-pill drying" style="padding:1px 6px;font-size:10.5px;">Non-RFID · Set Weight</span>` : `<span class="muted small">Non-RFID · Tracked</span>`)}
-              ${Number(sp.lastPrintUsedG || 0) > 0 ? `<span class="last-used-tag mono">-${fmtG(sp.lastPrintUsedG)}g last print</span>` : `<span class="muted small">Tare ${sp.tareGrams || 250}g</span>`}
-            </div>
-
-            <div class="slot-actions">
-              <button class="btn btn-secondary btn-xs" data-weigh-spool="${esc(sp.id)}" title="Calibrate with kitchen scale">⚖ Scale</button>
-              <button class="btn btn-ghost btn-xs" data-edit-spool="${esc(sp.id)}">Edit</button>
-              <button class="btn btn-ghost btn-xs" data-unload-spool="${esc(sp.id)}" title="Move spool to Vault">Unload</button>
-            </div>
+            ${rightBadge ? `<div class="slot-meta-row"><span></span>${rightBadge}</div>` : ""}
           </div>`;
       }).join("");
 
@@ -532,7 +543,6 @@
             <div class="ams-unit-title">
               <span class="unit-type-badge ${badgeClass}">${esc(unit.unitType)}</span>
               <strong>${esc(unit.label)}</strong>
-              <span class="muted small mono">ID ${unit.amsId}</span>
             </div>
             ${envHtml}
           </div>
@@ -1021,19 +1031,22 @@
             <span class="mat-pill">Plate ${draft.plateIndex || 1}</span>
           </div>
 
-          <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px;margin:10px 0;">
-            <label class="checkbox-inline"><input type="checkbox" id="prtUseAms" ${(draft.printOpts?.useAms !== false) ? "checked" : ""}/><span>Use AMS</span></label>
-            <label class="checkbox-inline"><input type="checkbox" id="prtBedLevel" ${(draft.printOpts?.bedLeveling !== false) ? "checked" : ""}/><span>Bed Leveling</span></label>
-            <label class="checkbox-inline"><input type="checkbox" id="prtVibCali" ${(draft.printOpts?.vibrationCali !== false) ? "checked" : ""}/><span>Vibration Cali</span></label>
-            <label class="checkbox-inline"><input type="checkbox" id="prtFlowCali" ${draft.printOpts?.flowCali ? "checked" : ""}/><span>Flow Cali</span></label>
-            <label class="checkbox-inline"><input type="checkbox" id="prtTimelapse" ${draft.printOpts?.timelapse ? "checked" : ""}/><span>Timelapse</span></label>
-            <label style="gap:3px;">Path Format
-              <select id="prtUrlScheme" style="padding:4px 6px;font-size:12px;">
-                <option value="ftp" ${(draft.printOpts?.urlScheme || "ftp") === "ftp" ? "selected" : ""}>ftp:/// (P2S Default)</option>
-                <option value="sdcard" ${draft.printOpts?.urlScheme === "sdcard" ? "selected" : ""}>file:///sdcard/</option>
-              </select>
-            </label>
-          </div>
+          <details class="collapsible-panel" style="margin-top:8px;padding-top:6px;">
+            <summary>Print Options <span class="muted small">(AMS · Bed Leveling · Vib Cali)</span></summary>
+            <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:8px;padding-top:10px;">
+              <label class="checkbox-inline"><input type="checkbox" id="prtUseAms" ${(draft.printOpts?.useAms !== false) ? "checked" : ""}/><span>Use AMS</span></label>
+              <label class="checkbox-inline"><input type="checkbox" id="prtBedLevel" ${(draft.printOpts?.bedLeveling !== false) ? "checked" : ""}/><span>Bed Leveling</span></label>
+              <label class="checkbox-inline"><input type="checkbox" id="prtVibCali" ${(draft.printOpts?.vibrationCali !== false) ? "checked" : ""}/><span>Vibration Cali</span></label>
+              <label class="checkbox-inline"><input type="checkbox" id="prtFlowCali" ${draft.printOpts?.flowCali ? "checked" : ""}/><span>Flow Cali</span></label>
+              <label class="checkbox-inline"><input type="checkbox" id="prtTimelapse" ${draft.printOpts?.timelapse ? "checked" : ""}/><span>Timelapse</span></label>
+              <label style="gap:3px;">Path Format
+                <select id="prtUrlScheme" style="padding:4px 6px;font-size:12px;">
+                  <option value="ftp" ${(draft.printOpts?.urlScheme || "ftp") === "ftp" ? "selected" : ""}>ftp:/// (P2S Default)</option>
+                  <option value="sdcard" ${draft.printOpts?.urlScheme === "sdcard" ? "selected" : ""}>file:///sdcard/</option>
+                </select>
+              </label>
+            </div>
+          </details>
 
           ${overallStatus === "fail" ? `<div class="muted small" style="color:#fca5a5;margin-bottom:8px;">⚠ Warning: Filament check shows at least one slot may run out before finishing.</div>` : ""}
 
@@ -1393,11 +1406,47 @@
     });
   }
 
+  // ==================== DROPDOWN MENUS ====================
+  function closeAllMenus(exceptId = null) {
+    document.querySelectorAll(".dropdown-menu").forEach(m => {
+      if (m.id !== exceptId) m.classList.add("hidden");
+    });
+  }
+
+  function toggleMenu(menuId) {
+    const el = $(menuId);
+    if (!el) return;
+    const isHidden = el.classList.contains("hidden");
+    closeAllMenus(menuId);
+    el.classList.toggle("hidden", !isHidden);
+  }
+
   // ==================== EVENT BINDINGS ====================
   function bindEvents() {
+    // Close dropdown menus when clicking outside or selecting a menu item
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".menu-wrap") || e.target.closest(".menu-item")) closeAllMenus();
+    });
+
+    // Topbar & Live Job Menus
+    $("btnMainMenu").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu("mainMenuDropdown"); });
+    $("btnLiveJobMenu").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu("liveJobDropdown"); });
+
+    $("btnOpenVaultTab").addEventListener("click", () => { closeAllMenus(); switchTab("vault"); });
+    $("btnBackToMonitor").addEventListener("click", () => switchTab("overview"));
+    $("btnMenuNewSpool").addEventListener("click", () => { closeAllMenus(); openSpoolModal(null, "VAULT"); });
+    $("btnMenuSettings").addEventListener("click", () => { closeAllMenus(); openSettingsModal(); });
+    $("btnMenuExit").addEventListener("click", () => { closeAllMenus(); $("btnShutdownServer").click(); });
+
+    $("btnToggleLastDetails").addEventListener("click", () => {
+      const dr = $("lastDetailsDrawer");
+      const open = dr.classList.toggle("hidden");
+      $("btnToggleLastDetails").textContent = open ? "Details ▾" : "Hide ▴";
+    });
+
     // Tabs
     document.querySelectorAll(".nav-tab").forEach(btn => {
-      btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+      btn.addEventListener("click", () => { closeAllMenus(); switchTab(btn.dataset.tab); });
     });
 
     // Close modals
@@ -1408,21 +1457,23 @@
       bg.addEventListener("click", (e) => { if (e.target === bg) bg.classList.add("hidden"); });
     });
 
-    // Topbar & Hero Quick Actions
+    // Topbar & Banner Quick Actions
     $("btnPrinterSettings").addEventListener("click", openSettingsModal);
     $("btnBannerConnect").addEventListener("click", openSettingsModal);
-    $("btnQuickMeasure").addEventListener("click", () => switchTab("last-print"));
-    $("btnQuickEstimate").addEventListener("click", () => switchTab("estimator"));
 
-    $("btnClearDemo").addEventListener("click", async () => {
+    const doClearDemo = async () => {
+      closeAllMenus();
       const res = await api("POST", "/api/demo/clear");
       state.db = res.db;
       toast("Cleared sample data. Ready for your P2S!");
       renderTopbarAndBanners();
       renderAllViews();
-    });
+    };
+    $("btnClearDemo").addEventListener("click", doClearDemo);
+    $("btnBannerClearDemo").addEventListener("click", doClearDemo);
 
     $("btnLoadSampleData").addEventListener("click", async () => {
+      closeAllMenus();
       const res = await api("POST", "/api/demo/load");
       state.db = res.db;
       toast("Loaded P2S + 2× AMS 2 Pro + AMS HT sample dataset.");
@@ -1505,18 +1556,29 @@
       const btn = e.target.closest("button");
       if (!btn) return;
 
+      if (btn.dataset.toggleMenu) {
+        e.stopPropagation();
+        toggleMenu(btn.dataset.toggleMenu);
+        return;
+      }
+
       if (btn.dataset.addToSlot) {
+        closeAllMenus();
         openSpoolModal(null, btn.dataset.addToSlot);
       } else if (btn.dataset.editSpool) {
+        closeAllMenus();
         openSpoolModal(btn.dataset.editSpool);
       } else if (btn.dataset.weighSpool) {
+        closeAllMenus();
         openWeighModal(btn.dataset.weighSpool);
       } else if (btn.dataset.unloadSpool) {
+        closeAllMenus();
         const res = await api("POST", "/api/spools/adjust", { id: btn.dataset.unloadSpool, slotKey: "VAULT" });
         state.db = res.db;
         toast("Moved spool to Spool Vault.");
         renderAllViews();
       } else if (btn.dataset.removeUnit) {
+        closeAllMenus();
         if (!confirm("Remove this AMS unit? Loaded spools will be safely moved to the Spool Vault.")) return;
         const res = await api("POST", "/api/ams/remove", { id: btn.dataset.removeUnit });
         state.db = res.db;
@@ -1693,10 +1755,9 @@
       }
     });
 
-    // Manual Last Print Entry
-    $("btnStartManualLast").addEventListener("click", () => {
-      $("manualLastForm").classList.toggle("hidden");
-      if (state.manualLastRows.length === 0) {
+    // Manual Last Print Entry (collapsible <details>)
+    $("manualLastDetails").addEventListener("toggle", (e) => {
+      if (e.target.open && state.manualLastRows.length === 0) {
         const firstSpool = getLoadedSpools()[0];
         state.manualLastRows.push({ spoolId: firstSpool ? firstSpool.id : "", grams: 35 });
         renderManualLastRows();
@@ -1835,9 +1896,14 @@
       syncFutureDraftFromManualRows();
     });
 
+    const updateBufferSummary = () => {
+      const el = $("estBufferSummary");
+      if (el) el.textContent = `(+${$("estBufferG").value || 0}g / ${$("estBufferPct").value || 0}%)`;
+      renderFutureEstimatorResult();
+    };
     ["estBufferG", "estBufferPct", "estIncludeAutoRefill"].forEach(id => {
-      $(id).addEventListener("input", renderFutureEstimatorResult);
-      $(id).addEventListener("change", renderFutureEstimatorResult);
+      $(id).addEventListener("input", updateBufferSummary);
+      $(id).addEventListener("change", updateBufferSummary);
     });
 
     // Vault
