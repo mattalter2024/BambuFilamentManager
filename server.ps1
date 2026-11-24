@@ -56,9 +56,10 @@ function New-SampleDatabase {
             accessCode      = ""
             safetyBufferG   = 15
             safetyBufferPct = 5
-            lowSpoolWarnG   = 150
-            autoConnect     = $false
-            autoSyncRfid    = $true
+            lowSpoolWarnG      = 150
+            autoConnect        = $false
+            autoSyncRfid       = $true
+            autoDeductOnFinish = $true
         }
         amsUnits = @(
             [ordered]@{ id = "ams-0"; amsId = 0; unitType = "AMS 2 Pro"; label = "AMS 2 Pro A"; slotCount = 4; tempC = 28.4; humidityRaw = 16; humidityLevel = 1; dryTimeMinutes = 0 },
@@ -139,9 +140,10 @@ function New-CleanDatabase {
             accessCode      = ""
             safetyBufferG   = 15
             safetyBufferPct = 5
-            lowSpoolWarnG   = 150
-            autoConnect     = $false
-            autoSyncRfid    = $true
+            lowSpoolWarnG      = 150
+            autoConnect        = $false
+            autoSyncRfid       = $true
+            autoDeductOnFinish = $true
         }
         amsUnits = @(
             [ordered]@{ id = "ams-0"; amsId = 0; unitType = "AMS 2 Pro"; label = "AMS 2 Pro A"; slotCount = 4; tempC = 0; humidityRaw = 0; humidityLevel = 0; dryTimeMinutes = 0 },
@@ -396,6 +398,261 @@ function Test-HasKey($dict, [string]$key) {
     return ($dict.Keys -contains $key)
 }
 
+function Get-HexColorDistance([string]$hex1, [string]$hex2) {
+    $c1 = ([string]$hex1).TrimStart('#')
+    $c2 = ([string]$hex2).TrimStart('#')
+    if ($c1.Length -lt 6 -or $c2.Length -lt 6) { return 999.0 }
+    try {
+        $r1 = [Convert]::ToInt32($c1.Substring(0,2), 16); $g1 = [Convert]::ToInt32($c1.Substring(2,2), 16); $b1 = [Convert]::ToInt32($c1.Substring(4,2), 16)
+        $r2 = [Convert]::ToInt32($c2.Substring(0,2), 16); $g2 = [Convert]::ToInt32($c2.Substring(2,2), 16); $b2 = [Convert]::ToInt32($c2.Substring(4,2), 16)
+        return [math]::Sqrt([math]::Pow($r1 - $r2, 2) + [math]::Pow($g1 - $g2, 2) + [math]::Pow($b1 - $b2, 2))
+    } catch { return 999.0 }
+}
+
+function Resolve-SpoolForFilament($db, $fil, [string]$mappedSlotKey, $usedSlotKeys, [bool]$isSingleFilament) {
+    $loaded = @($db["spools"] | Where-Object { $_["slotKey"] -ne "VAULT" })
+    if ($loaded.Count -eq 0) { return $null }
+
+    # 1. Exact AMS mapping reported by P2S MQTT
+    if (-not [string]::IsNullOrWhiteSpace($mappedSlotKey)) {
+        foreach ($sp in $loaded) {
+            if ($sp["slotKey"] -eq $mappedSlotKey) { return $sp }
+        }
+    }
+
+    # 2. Single-filament job where P2S tray_now recorded exactly 1 active physical slot
+    if ($isSingleFilament -and $null -ne $usedSlotKeys -and $usedSlotKeys.Count -eq 1) {
+        $onlySlot = [string]$usedSlotKeys[0]
+        foreach ($sp in $loaded) {
+            if ($sp["slotKey"] -eq $onlySlot) { return $sp }
+        }
+    }
+
+    # 3. Best material + closest color match (with bonus for slots actually seen active during print)
+    $targetType = ([string]$fil.Type).ToUpperInvariant()
+    $targetBase = ($targetType -split '-')[0]
+    $targetCol  = [string]$fil.Color
+
+    $best = $null
+    $bestScore = [double]::MaxValue
+    foreach ($sp in $loaded) {
+        $spMat = ([string]$sp["material"]).ToUpperInvariant()
+        $matExact = ($spMat -eq $targetType)
+        $matBase  = ($spMat.StartsWith($targetBase) -or $targetBase.StartsWith(($spMat -split '-')[0]))
+        $dist = Get-HexColorDistance ([string]$sp["color"]) $targetCol
+        $activeBonus = if ($null -ne $usedSlotKeys -and ($usedSlotKeys -contains [string]$sp["slotKey"])) { -25.0 } else { 0.0 }
+        $score = $dist + $(if ($matExact) { 0.0 } elseif ($matBase) { 40.0 } else { 500.0 }) + $activeBonus
+        if ($score -lt $bestScore) {
+            $bestScore = $score
+            $best = $sp
+        }
+    }
+    return $best
+}
+
+function Apply-PrintDeduction($db, $payload) {
+    $itemsInput = $payload["items"]
+    $completionPct = if (Test-HasKey $payload "completionPct") { [double]$payload["completionPct"] } else { 100.0 }
+    $scaleFactor = [math]::Max(0.01, [math]::Min(1.0, $completionPct / 100.0))
+
+    foreach ($sp in $db["spools"]) {
+        $sp["lastPrintUsedG"] = 0
+    }
+
+    $loggedItems = New-Object System.Collections.ArrayList
+    $totalG = 0.0
+    $totalM = 0.0
+
+    foreach ($it in $itemsInput) {
+        $usedG = [math]::Round(([double]$it["usedGrams"]) * $scaleFactor, 2)
+        $usedM = [math]::Round(([double]$it["usedMeters"]) * $scaleFactor, 2)
+        if ($usedG -le 0) { continue }
+
+        $spoolId = [string]$it["spoolId"]
+        $slotKey = [string]$it["slotKey"]
+        $spoolObj = $null
+        foreach ($sp in $db["spools"]) {
+            if ((-not [string]::IsNullOrWhiteSpace($spoolId) -and $sp["id"] -eq $spoolId) -or
+                ([string]::IsNullOrWhiteSpace($spoolId) -and -not [string]::IsNullOrWhiteSpace($slotKey) -and $sp["slotKey"] -eq $slotKey)) {
+                $spoolObj = $sp
+                break
+            }
+        }
+
+        $beforeG = 0.0
+        $afterG = 0.0
+        $spName = [string]$it["spoolName"]
+        $spMat  = [string]$it["material"]
+        $spCol  = [string]$it["color"]
+
+        if ($null -ne $spoolObj) {
+            $beforeG = [double]$spoolObj["remainingGrams"]
+            $afterG = [math]::Max(0, [math]::Round($beforeG - $usedG, 2))
+            $spoolObj["remainingGrams"] = $afterG
+            $spoolObj["lastPrintUsedG"] = [math]::Round(([double]$spoolObj["lastPrintUsedG"]) + $usedG, 2)
+            $spoolId = [string]$spoolObj["id"]
+            $slotKey = [string]$spoolObj["slotKey"]
+            $spName  = [string]$spoolObj["name"]
+            $spMat   = [string]$spoolObj["material"]
+            $spCol   = [string]$spoolObj["color"]
+        }
+
+        $totalG += $usedG
+        $totalM += $usedM
+
+        [void]$loggedItems.Add([ordered]@{
+            slotKey     = $slotKey
+            spoolId     = $spoolId
+            spoolName   = $spName
+            material    = $spMat
+            color       = $spCol
+            usedGrams   = $usedG
+            usedMeters  = $usedM
+            beforeGrams = $beforeG
+            afterGrams  = $afterG
+        })
+    }
+
+    $entry = [ordered]@{
+        id                = "pr-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+        timestampUtc      = [DateTime]::UtcNow.ToString("o")
+        fileName          = [string]$payload["fileName"]
+        plateName         = [string]$payload["plateName"]
+        source            = $(if (-not [string]::IsNullOrWhiteSpace($payload["source"])) { [string]$payload["source"] } else { "3MF Slicer" })
+        status            = $(if ($completionPct -lt 99.5) { "PARTIAL" } else { "FINISH" })
+        completionPct     = [math]::Round($completionPct, 0)
+        totalGrams        = [math]::Round($totalG, 2)
+        totalMeters       = [math]::Round($totalM, 2)
+        flushGrams        = $(if (Test-HasKey $payload "flushGrams") { [math]::Round(([double]$payload["flushGrams"]) * $scaleFactor, 2) } else { 0 })
+        predictionSeconds = $(if (Test-HasKey $payload "predictionSeconds") { [int]$payload["predictionSeconds"] } else { 0 })
+        thumbnailBase64   = [string]$payload["thumbnailBase64"]
+        undone            = $false
+        items             = @($loggedItems)
+    }
+
+    $hist = To-List $db["history"]
+    $hist.Insert(0, $entry)
+    if ($hist.Count -gt 100) { $hist.RemoveAt($hist.Count - 1) }
+    $db["history"] = @($hist)
+    $db["isDemoData"] = $false
+    Save-Database $db
+    return $entry
+}
+
+$script:ProcessedAutoJobs = New-Object "System.Collections.Generic.HashSet[string]"
+$script:LastAutoDeductNotice = $null
+
+function Invoke-AutoDeductIfFinished($db, $snap) {
+    if ($null -eq $snap -or [string]::IsNullOrWhiteSpace($snap.LastFinishedJobId)) { return $false }
+    $cfg = $db["config"]
+    if ((Test-HasKey $cfg "autoDeductOnFinish") -and (-not [bool]$cfg["autoDeductOnFinish"])) { return $false }
+
+    $jobId = [string]$snap.LastFinishedJobId
+    if ($script:ProcessedAutoJobs.Contains($jobId)) { return $false }
+    [void]$script:ProcessedAutoJobs.Add($jobId)
+
+    Write-Host ""
+    Write-Host "[AUTO-DEDUCT] Detected finished print ($($snap.LastFinishedState), $($snap.LastFinishedPercent)%): $($snap.LastFinishedSubtaskName) / $($snap.LastFinishedFileName)" -ForegroundColor Cyan
+
+    # Sync live AMS units/spools first so slot matching uses up-to-date slots
+    if ($snap.Connected -and $snap.AmsUnits.Count -gt 0) {
+        [void](Sync-LiveTelemetryIntoDb $db $snap)
+    }
+
+    $parsed = $null
+    $sourceLabel = "Auto (P2S FTPS)"
+    $mappingKeys = @($snap.LastFinishedMappingKeys)
+    $usedSlots   = @($snap.LastFinishedUsedSlots)
+
+    # Source 1: P2S External USB FTPS
+    if (-not [string]::IsNullOrWhiteSpace($cfg["printerIp"]) -and -not [string]::IsNullOrWhiteSpace($cfg["accessCode"])) {
+        $fErr = $null
+        $files = [BambuFilamentManager.BambuFtpsClient]::ListPrintFiles([string]$cfg["printerIp"], [string]$cfg["accessCode"], [ref]$fErr)
+        if ($files.Count -gt 0) {
+            $matched = [BambuFilamentManager.BambuFtpsClient]::FindMatchingFile($files, $snap.LastFinishedFileName, $snap.LastFinishedSubtaskName)
+            if ($null -ne $matched) {
+                $dErr = $null
+                $parsed = [BambuFilamentManager.BambuFtpsClient]::DownloadAndParse([string]$cfg["printerIp"], [string]$cfg["accessCode"], $matched.Path, [ref]$dErr)
+                if ($null -ne $parsed) { $sourceLabel = "Auto (P2S USB)" }
+            }
+        }
+    }
+
+    # Source 2: Bambu Cloud tasks (if configured)
+    if ($null -eq $parsed -and [string]$cfg["connectionMode"] -eq "cloud" -and -not [string]::IsNullOrWhiteSpace($cfg["cloudToken"])) {
+        $cErr = $null
+        $tasks = [BambuFilamentManager.BambuCloudClient]::GetTasks([string]$cfg["cloudRegion"], [string]$cfg["cloudToken"], [string]$cfg["printerSerial"], 5, [ref]$cErr)
+        if ($tasks.Count -gt 0) {
+            $parsed = $tasks[0].Parsed
+            if ($mappingKeys.Count -eq 0 -and $tasks[0].MappingKeys.Count -gt 0) { $mappingKeys = @($tasks[0].MappingKeys) }
+            $sourceLabel = "Auto (Bambu Cloud)"
+        }
+    }
+
+    # Source 3: Local Bambu Studio / OrcaSlicer cache fallback
+    if ($null -eq $parsed) {
+        $localFiles = [BambuFilamentManager.LocalSlicerScanner]::FindRecentSlicedPrints(5)
+        if ($localFiles.Count -gt 0) {
+            $pick = $localFiles[0]
+            if (-not [string]::IsNullOrWhiteSpace($snap.LastFinishedSubtaskName)) {
+                foreach ($lf in $localFiles) {
+                    if ($lf.Name -like ("*" + $snap.LastFinishedSubtaskName + "*")) { $pick = $lf; break }
+                }
+            }
+            $parsed = [BambuFilamentManager.LocalSlicerScanner]::ParseLocalItem($pick.FullPath)
+            if ($null -ne $parsed) { $sourceLabel = "Auto ($($pick.Source))" }
+        }
+    }
+
+    if ($null -eq $parsed -or $parsed.Filaments.Count -eq 0) {
+        Write-Warning "[AUTO-DEDUCT] Could not locate .gcode.3mf automatically for '$($snap.LastFinishedSubtaskName)'. Leaving manual banner active."
+        return $false
+    }
+
+    $itemsPayload = New-Object System.Collections.ArrayList
+    $isSingle = ($parsed.Filaments.Count -eq 1)
+    for ($i = 0; $i -lt $parsed.Filaments.Count; $i++) {
+        $fil = $parsed.Filaments[$i]
+        $mKey = if ($i -lt $mappingKeys.Count) { [string]$mappingKeys[$i] } else { "" }
+        $sp = Resolve-SpoolForFilament $db $fil $mKey $usedSlots $isSingle
+        [void]$itemsPayload.Add([ordered]@{
+            spoolId    = $(if ($null -ne $sp) { [string]$sp["id"] } else { "" })
+            slotKey    = $(if ($null -ne $sp) { [string]$sp["slotKey"] } else { "" })
+            spoolName  = $(if ($null -ne $sp) { [string]$sp["name"] } else { [string]$fil.Type })
+            material   = [string]$fil.Type
+            color      = [string]$fil.Color
+            usedGrams  = [double]$fil.UsedGrams
+            usedMeters = [double]$fil.UsedMeters
+        })
+    }
+
+    $plateTitle = if (-not [string]::IsNullOrWhiteSpace($snap.LastFinishedSubtaskName)) { $snap.LastFinishedSubtaskName } elseif (-not [string]::IsNullOrWhiteSpace($parsed.PlateName)) { $parsed.PlateName } else { $parsed.FileName }
+    $entry = Apply-PrintDeduction $db ([ordered]@{
+        fileName          = $parsed.FileName
+        plateName         = $plateTitle
+        source            = $sourceLabel
+        completionPct     = $(if ($snap.LastFinishedPercent -gt 0) { $snap.LastFinishedPercent } else { 100 })
+        flushGrams        = $parsed.FlushGrams
+        predictionSeconds = $parsed.PredictionSeconds
+        thumbnailBase64   = $parsed.ThumbnailBase64
+        items             = @($itemsPayload)
+    })
+
+    $MqttClient.ClearLastFinishedJob($jobId)
+
+    $slotSummary = (@($entry["items"] | ForEach-Object { "$($_["slotKey"]) -$($_["usedGrams"])g" })) -join ", "
+    $script:LastAutoDeductNotice = [ordered]@{
+        id           = $entry["id"]
+        plateName    = $entry["plateName"]
+        totalGrams   = $entry["totalGrams"]
+        slotSummary  = $slotSummary
+        source       = $sourceLabel
+        timestampUtc = $entry["timestampUtc"]
+    }
+    Write-Host "[AUTO-DEDUCT] Deducted $($entry["totalGrams"])g for '$($entry["plateName"])' ($slotSummary) via $sourceLabel!" -ForegroundColor Green
+    return $true
+}
+
 function Connect-ConfiguredPrinter($cfg) {
     $mode = if ((Test-HasKey $cfg "connectionMode") -and -not [string]::IsNullOrWhiteSpace($cfg["connectionMode"])) { [string]$cfg["connectionMode"] } else { "lan" }
     if ($mode -eq "cloud") {
@@ -411,8 +668,9 @@ $Db = Load-Database
 if (-not (Test-HasKey $Db["config"] "connectionMode")) { $Db["config"]["connectionMode"] = "lan"; Save-Database $Db }
 if (-not (Test-HasKey $Db["config"] "cloudRegion"))    { $Db["config"]["cloudRegion"] = "global" }
 if (-not (Test-HasKey $Db["config"] "cloudEmail"))     { $Db["config"]["cloudEmail"] = "" }
-if (-not (Test-HasKey $Db["config"] "cloudUid"))       { $Db["config"]["cloudUid"] = "" }
-if (-not (Test-HasKey $Db["config"] "cloudToken"))     { $Db["config"]["cloudToken"] = "" }
+if (-not (Test-HasKey $Db["config"] "cloudUid"))           { $Db["config"]["cloudUid"] = "" }
+if (-not (Test-HasKey $Db["config"] "cloudToken"))         { $Db["config"]["cloudToken"] = "" }
+if (-not (Test-HasKey $Db["config"] "autoDeductOnFinish")) { $Db["config"]["autoDeductOnFinish"] = $true; Save-Database $Db }
 
 if ($Db["config"]["autoConnect"]) {
     $m = [string]$Db["config"]["connectionMode"]
@@ -456,9 +714,27 @@ if (-not $NoBrowser) {
     Start-Process $Url
 }
 
+$script:LastBgCheckUtc = [DateTime]::MinValue
+
 try {
     while ($Server.IsListening) {
-        $req = $Server.AcceptRequest()
+        # Background check every ~2.5s so finished prints auto-deduct even when browser is closed!
+        if (([DateTime]::UtcNow - $script:LastBgCheckUtc).TotalSeconds -ge 2.5) {
+            $script:LastBgCheckUtc = [DateTime]::UtcNow
+            try {
+                $bgSnap = $MqttClient.GetSnapshot()
+                if ($Db["config"]["autoSyncRfid"] -and $bgSnap.Connected -and $bgSnap.AmsUnits.Count -gt 0) {
+                    [void](Sync-LiveTelemetryIntoDb $Db $bgSnap)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($bgSnap.LastFinishedJobId)) {
+                    [void](Invoke-AutoDeductIfFinished $Db $bgSnap)
+                }
+            } catch {
+                Write-Warning "Background check error: $_"
+            }
+        }
+
+        $req = $Server.AcceptRequestWithTimeout(1200)
         if ($null -eq $req) { continue }
         $res = $req
         $path = $req.Path
@@ -470,16 +746,26 @@ try {
                 if ($Db["config"]["autoSyncRfid"] -and $snap.Connected -and $snap.AmsUnits.Count -gt 0) {
                     [void](Sync-LiveTelemetryIntoDb $Db $snap)
                 }
+                if (-not [string]::IsNullOrWhiteSpace($snap.LastFinishedJobId)) {
+                    if (Invoke-AutoDeductIfFinished $Db $snap) {
+                        $snap = $MqttClient.GetSnapshot()
+                    }
+                }
                 Send-Json $res ([ordered]@{
-                    ok        = $true
-                    db        = $Db
-                    telemetry = $snap
+                    ok               = $true
+                    db               = $Db
+                    telemetry        = $snap
+                    autoDeductNotice = $script:LastAutoDeductNotice
                 })
+            }
+            elseif ($method -eq "POST" -and $path -eq "/api/auto-deduct/dismiss") {
+                $script:LastAutoDeductNotice = $null
+                Send-Json $res ([ordered]@{ ok = $true })
             }
             elseif ($method -eq "POST" -and $path -eq "/api/config") {
                 $body = Parse-JsonBody $req
                 $cfg = $Db["config"]
-                foreach ($k in @("connectionMode","cloudRegion","cloudEmail","cloudUid","cloudToken","printerModel","printerName","printerIp","printerSerial","accessCode","safetyBufferG","safetyBufferPct","lowSpoolWarnG","autoConnect","autoSyncRfid")) {
+                foreach ($k in @("connectionMode","cloudRegion","cloudEmail","cloudUid","cloudToken","printerModel","printerName","printerIp","printerSerial","accessCode","safetyBufferG","safetyBufferPct","lowSpoolWarnG","autoConnect","autoSyncRfid","autoDeductOnFinish")) {
                     if ($body.ContainsKey($k)) { $cfg[$k] = $body[$k] }
                 }
                 if ($cfg["connectionMode"] -eq "cloud" -and -not [string]::IsNullOrWhiteSpace($cfg["cloudToken"]) -and [string]::IsNullOrWhiteSpace($cfg["cloudUid"])) {
@@ -1028,97 +1314,10 @@ try {
             }
             elseif ($method -eq "POST" -and $path -eq "/api/prints/log") {
                 $body = Parse-JsonBody $req
-                $itemsInput = $body["items"]
-                $completionPct = if ($body.ContainsKey("completionPct")) { [double]$body["completionPct"] } else { 100.0 }
-                $scaleFactor = [math]::Max(0.01, [math]::Min(1.0, $completionPct / 100.0))
-
-                # Clear previous lastPrintUsedG tags so UI cleanly shows ONLY the latest print's usage
-                foreach ($sp in $Db["spools"]) {
-                    $sp["lastPrintUsedG"] = 0
-                }
-
-                $loggedItems = New-Object System.Collections.ArrayList
-                $totalG = 0.0
-                $totalM = 0.0
-
-                foreach ($it in $itemsInput) {
-                    $usedG = [math]::Round(([double]$it["usedGrams"]) * $scaleFactor, 2)
-                    $usedM = [math]::Round(([double]$it["usedMeters"]) * $scaleFactor, 2)
-                    if ($usedG -le 0) { continue }
-
-                    $spoolId = [string]$it["spoolId"]
-                    $slotKey = [string]$it["slotKey"]
-                    $spoolObj = $null
-                    foreach ($sp in $Db["spools"]) {
-                        if ((-not [string]::IsNullOrWhiteSpace($spoolId) -and $sp["id"] -eq $spoolId) -or
-                            ([string]::IsNullOrWhiteSpace($spoolId) -and -not [string]::IsNullOrWhiteSpace($slotKey) -and $sp["slotKey"] -eq $slotKey)) {
-                            $spoolObj = $sp
-                            break
-                        }
-                    }
-
-                    $beforeG = 0.0
-                    $afterG = 0.0
-                    $spName = [string]$it["spoolName"]
-                    $spMat = [string]$it["material"]
-                    $spCol = [string]$it["color"]
-
-                    if ($null -ne $spoolObj) {
-                        $beforeG = [double]$spoolObj["remainingGrams"]
-                        $afterG = [math]::Max(0, [math]::Round($beforeG - $usedG, 2))
-                        $spoolObj["remainingGrams"] = $afterG
-                        $spoolObj["lastPrintUsedG"] = [math]::Round(([double]$spoolObj["lastPrintUsedG"]) + $usedG, 2)
-                        $spoolId = [string]$spoolObj["id"]
-                        $slotKey = [string]$spoolObj["slotKey"]
-                        $spName = [string]$spoolObj["name"]
-                        $spMat = [string]$spoolObj["material"]
-                        $spCol = [string]$spoolObj["color"]
-                    }
-
-                    $totalG += $usedG
-                    $totalM += $usedM
-
-                    [void]$loggedItems.Add([ordered]@{
-                        slotKey     = $slotKey
-                        spoolId     = $spoolId
-                        spoolName   = $spName
-                        material    = $spMat
-                        color       = $spCol
-                        usedGrams   = $usedG
-                        usedMeters  = $usedM
-                        beforeGrams = $beforeG
-                        afterGrams  = $afterG
-                    })
-                }
-
-                $entry = [ordered]@{
-                    id                = "pr-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
-                    timestampUtc      = [DateTime]::UtcNow.ToString("o")
-                    fileName          = [string]$body["fileName"]
-                    plateName         = [string]$body["plateName"]
-                    source            = $(if (-not [string]::IsNullOrWhiteSpace($body["source"])) { [string]$body["source"] } else { "3MF Slicer" })
-                    status            = $(if ($completionPct -lt 99.5) { "PARTIAL" } else { "FINISH" })
-                    completionPct     = [math]::Round($completionPct, 0)
-                    totalGrams        = [math]::Round($totalG, 2)
-                    totalMeters       = [math]::Round($totalM, 2)
-                    flushGrams        = $(if ($body.ContainsKey("flushGrams")) { [math]::Round(([double]$body["flushGrams"]) * $scaleFactor, 2) } else { 0 })
-                    predictionSeconds = $(if ($body.ContainsKey("predictionSeconds")) { [int]$body["predictionSeconds"] } else { 0 })
-                    thumbnailBase64   = [string]$body["thumbnailBase64"]
-                    undone            = $false
-                    items             = @($loggedItems)
-                }
-
-                $hist = To-List $Db["history"]
-                $hist.Insert(0, $entry)
-                if ($hist.Count -gt 100) { $hist.RemoveAt($hist.Count - 1) }
-                $Db["history"] = @($hist)
-                $Db["isDemoData"] = $false
-
-                if ($body.ContainsKey("finishedJobId") -and -not [string]::IsNullOrWhiteSpace($body["finishedJobId"])) {
+                $entry = Apply-PrintDeduction $Db $body
+                if ((Test-HasKey $body "finishedJobId") -and -not [string]::IsNullOrWhiteSpace($body["finishedJobId"])) {
                     $MqttClient.ClearLastFinishedJob([string]$body["finishedJobId"])
                 }
-
-                Save-Database $Db
                 Send-Json $res ([ordered]@{ ok = $true; entry = $entry; db = $Db })
             }
             elseif ($method -eq "POST" -and $path -eq "/api/prints/undo") {

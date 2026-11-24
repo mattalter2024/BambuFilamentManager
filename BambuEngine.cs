@@ -627,8 +627,25 @@ namespace BambuFilamentManager
             if (files == null || files.Count == 0) return null;
             string cleanGcode = Path.GetFileName((gcodeFile ?? "").Trim());
             string cleanSubtask = (subtaskName ?? "").Trim();
+            bool gcodeIsGeneric = string.IsNullOrEmpty(cleanGcode) ||
+                                  Regex.IsMatch(cleanGcode, @"^plate_\d+\.gcode$", RegexOptions.IgnoreCase);
 
-            if (!string.IsNullOrEmpty(cleanGcode))
+            // On P2S, gcode_file is often "/data/Metadata/plate_1.gcode" while subtask_name holds the real print name.
+            // Always prioritize matching subtaskName first when gcodeFile is generic!
+            if (!string.IsNullOrEmpty(cleanSubtask))
+            {
+                string subNorm = NormalizeMatchKey(cleanSubtask);
+                var exactSub = files.FirstOrDefault(f =>
+                    NormalizeMatchKey(f.Name.Replace(".gcode.3mf", "").Replace(".3mf", "").Replace(".gcode", "")) == subNorm);
+                if (exactSub != null) return exactSub;
+
+                var partialSub = files.FirstOrDefault(f =>
+                    f.Name.IndexOf(cleanSubtask, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    NormalizeMatchKey(f.Name).Contains(subNorm));
+                if (partialSub != null) return partialSub;
+            }
+
+            if (!gcodeIsGeneric)
             {
                 var exact = files.FirstOrDefault(f => f.Name.Equals(cleanGcode, StringComparison.OrdinalIgnoreCase));
                 if (exact != null) return exact;
@@ -639,12 +656,12 @@ namespace BambuFilamentManager
                     if (partial != null) return partial;
                 }
             }
-            if (!string.IsNullOrEmpty(cleanSubtask))
-            {
-                var subMatch = files.FirstOrDefault(f => f.Name.IndexOf(cleanSubtask, StringComparison.OrdinalIgnoreCase) >= 0);
-                if (subMatch != null) return subMatch;
-            }
             return files[0];
+        }
+
+        private static string NormalizeMatchKey(string s)
+        {
+            return Regex.Replace((s ?? "").ToLowerInvariant(), @"[^a-z0-9]", "");
         }
 
         public static bool UploadFile(string ip, string accessCode, string localFilePath, string remotePath, out string error)
@@ -1400,10 +1417,12 @@ namespace BambuFilamentManager
         // Pending finished job alert for auto-deduction
         public string LastFinishedJobId { get; set; }
         public string LastFinishedFileName { get; set; }
+        public string LastFinishedSubtaskName { get; set; }
         public string LastFinishedState { get; set; }
         public int LastFinishedPercent { get; set; }
         public List<int> LastFinishedMapping { get; set; }
         public List<string> LastFinishedMappingKeys { get; set; }
+        public List<string> LastFinishedUsedSlots { get; set; }
         public string LastFinishedAtUtc { get; set; }
 
         public PrinterTelemetrySnapshot()
@@ -1415,6 +1434,7 @@ namespace BambuFilamentManager
             AmsUnits = new List<LiveAmsUnit>();
             LastFinishedMapping = new List<int>();
             LastFinishedMappingKeys = new List<string>();
+            LastFinishedUsedSlots = new List<string>();
         }
     }
 
@@ -1442,6 +1462,7 @@ namespace BambuFilamentManager
         private int _activeJobMaxPercent = 0;
         private List<int> _activeJobMapping = new List<int>();
         private List<string> _activeJobMappingKeys = new List<string>();
+        private List<string> _activeJobUsedSlots = new List<string>();
         private DateTime _lastPingUtc = DateTime.UtcNow;
 
         public void ConfigureAndConnect(string ip, string serial, string accessCode)
@@ -1958,6 +1979,12 @@ namespace BambuFilamentManager
                     string upperState = (newGcodeState ?? "").ToUpperInvariant();
                     if (upperState == "RUNNING" || upperState == "PREPARE" || upperState == "PAUSE")
                     {
+                        if (_prevGcodeState != "RUNNING" && _prevGcodeState != "PREPARE" && _prevGcodeState != "PAUSE")
+                        {
+                            // Fresh job starting: reset per-job accumulators
+                            _activeJobMaxPercent = 0;
+                            _activeJobUsedSlots.Clear();
+                        }
                         if (!string.IsNullOrWhiteSpace(gcodeFile)) _activeJobFile = gcodeFile;
                         if (!string.IsNullOrWhiteSpace(subtask)) _activeJobSubtask = subtask;
                         if (mcPercent > _activeJobMaxPercent) _activeJobMaxPercent = mcPercent;
@@ -1967,12 +1994,15 @@ namespace BambuFilamentManager
                     {
                         _state.LastFinishedJobId = Guid.NewGuid().ToString("N");
                         _state.LastFinishedFileName = !string.IsNullOrWhiteSpace(_activeJobFile) ? _activeJobFile : _activeJobSubtask;
+                        _state.LastFinishedSubtaskName = !string.IsNullOrWhiteSpace(_activeJobSubtask) ? _activeJobSubtask : subtask;
                         _state.LastFinishedState = upperState;
                         _state.LastFinishedPercent = upperState == "FINISH" ? 100 : Math.Max(1, _activeJobMaxPercent);
                         _state.LastFinishedMapping = new List<int>(_activeJobMapping);
                         _state.LastFinishedMappingKeys = new List<string>(_activeJobMappingKeys);
+                        _state.LastFinishedUsedSlots = new List<string>(_activeJobUsedSlots);
                         _state.LastFinishedAtUtc = DateTime.UtcNow.ToString("o");
                         _activeJobMaxPercent = 0;
+                        _activeJobUsedSlots.Clear();
                     }
                     _prevGcodeState = upperState;
 
@@ -1982,6 +2012,19 @@ namespace BambuFilamentManager
                         var amsRoot = (Dictionary<string, object>)print["ams"];
                         string trayNow = GetString(amsRoot, "tray_now", _state.ActiveTrayNow);
                         _state.ActiveTrayNow = trayNow;
+
+                        // Record physical AMS slot actively feeding during print for fallback auto-matching
+                        if ((upperState == "RUNNING" || upperState == "PREPARE") && !string.IsNullOrWhiteSpace(trayNow) && trayNow != "255")
+                        {
+                            int tNowIdx;
+                            if (int.TryParse(trayNow, out tNowIdx) && tNowIdx >= 0 && tNowIdx != 255)
+                            {
+                                string activeKey = tNowIdx == 254
+                                    ? "EXT"
+                                    : (tNowIdx >= 128 ? ("HT-" + ((tNowIdx - 128) + 1)) : (((char)('A' + Math.Min(tNowIdx / 4, 25))).ToString() + ((tNowIdx % 4) + 1)));
+                                if (!_activeJobUsedSlots.Contains(activeKey)) _activeJobUsedSlots.Add(activeKey);
+                            }
+                        }
 
                         var unitArr = AsObjectList(amsRoot.ContainsKey("ams") ? amsRoot["ams"] : null);
                         if (unitArr != null)
@@ -2437,8 +2480,21 @@ namespace BambuFilamentManager
 
         public SimpleHttpRequest AcceptRequest()
         {
+            return AcceptRequestWithTimeout(-1);
+        }
+
+        public SimpleHttpRequest AcceptRequestWithTimeout(int timeoutMs)
+        {
+            var start = DateTime.UtcNow;
             while (IsListening)
             {
+                if (timeoutMs >= 0 && !_listener.Pending())
+                {
+                    if ((DateTime.UtcNow - start).TotalMilliseconds >= timeoutMs) return null;
+                    Thread.Sleep(40);
+                    continue;
+                }
+
                 TcpClient client = _listener.AcceptTcpClient();
                 client.ReceiveTimeout = 15000;
                 client.SendTimeout = 15000;

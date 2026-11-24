@@ -89,7 +89,19 @@
       </div>
     </div>
 
-    <!-- Auto-detected Finished Print Banner (appears only after a job completes) -->
+    <!-- Auto-Deducted Confirmation Banner (shown after hands-free deduction, with 1-click Undo) -->
+    <div class="alert-banner alert-success hidden" id="autoDeductBanner">
+      <div>
+        <strong>Totals Auto-Updated:</strong>
+        <span id="autoDeductText"></span>
+      </div>
+      <div class="banner-actions">
+        <button class="btn btn-secondary btn-xs" id="btnUndoAutoDeduct">Undo</button>
+        <button class="btn btn-ghost btn-xs" id="btnDismissAutoDeduct">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Auto-detected Finished Print Banner (fallback only if auto-deduct is off or file not found) -->
     <div class="alert-banner alert-success hidden" id="finishedJobBanner">
       <div>
         <strong>Print Finished:</strong>
@@ -441,6 +453,10 @@
           <label class="checkbox-inline">
             <input type="checkbox" id="cfgAutoSyncRfid" checked />
             <span>Sync live AMS 2 Pro / AMS HT slots automatically</span>
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="cfgAutoDeduct" checked />
+            <span>Auto-deduct filament totals when a print completes (hands-free)</span>
           </label>
         </div>
       </div>

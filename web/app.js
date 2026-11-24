@@ -27,7 +27,9 @@
     futureManualRows: [],
     cloudTasksCache: [],
     cloudDevicesCache: [],
-    lastShownCmdAt: ""
+    lastShownCmdAt: "",
+    autoDeductNotice: null,
+    lastToastAutoDeductId: ""
   };
 
   // ==================== UTILITIES ====================
@@ -210,6 +212,12 @@
       const data = await api("GET", "/api/state");
       state.db = data.db;
       state.telemetry = data.telemetry;
+      state.autoDeductNotice = data.autoDeductNotice || null;
+      if (state.autoDeductNotice && state.autoDeductNotice.id && state.autoDeductNotice.id !== state.lastToastAutoDeductId) {
+        state.lastToastAutoDeductId = state.autoDeductNotice.id;
+        toast(`Auto-deducted ${fmtG(state.autoDeductNotice.totalGrams)}g for "${state.autoDeductNotice.plateName}"!`);
+        renderFull = true;
+      }
       renderTopbarAndBanners();
       if (renderFull) {
         renderAllViews();
@@ -308,7 +316,17 @@
       }
     }
 
-    // Finished job banner
+    // Auto-deducted confirmation banner
+    const autoBanner = $("autoDeductBanner");
+    if (state.autoDeductNotice && state.autoDeductNotice.id) {
+      autoBanner.classList.remove("hidden");
+      const n = state.autoDeductNotice;
+      $("autoDeductText").textContent = `${n.plateName} (-${fmtG(n.totalGrams)}g · ${n.slotSummary || n.source})`;
+    } else {
+      autoBanner.classList.add("hidden");
+    }
+
+    // Finished job banner (fallback when auto-deduct is disabled or file not found)
     const finBanner = $("finishedJobBanner");
     if (tel.LastFinishedJobId) {
       finBanner.classList.remove("hidden");
@@ -1306,6 +1324,7 @@
     $("cfgSafetyPct").value = cfg.safetyBufferPct ?? 5;
     $("cfgAutoConnect").checked = !!cfg.autoConnect;
     $("cfgAutoSyncRfid").checked = cfg.autoSyncRfid !== false;
+    $("cfgAutoDeduct").checked = cfg.autoDeductOnFinish !== false;
     toggleConnectionModeSections();
     openModal("modalSettings");
     renderTopbarAndBanners();
@@ -1479,6 +1498,24 @@
       toast("Loaded P2S + 2× AMS 2 Pro + AMS HT sample dataset.");
       renderTopbarAndBanners();
       renderAllViews();
+    });
+
+    // Auto-deduct confirmation banner actions
+    $("btnUndoAutoDeduct").addEventListener("click", async () => {
+      const id = state.autoDeductNotice?.id;
+      if (!id) return;
+      const res = await api("POST", "/api/prints/undo", { id });
+      await api("POST", "/api/auto-deduct/dismiss");
+      state.db = res.db;
+      state.autoDeductNotice = null;
+      toast("Undid automatic deduction and restored spool weights.");
+      renderTopbarAndBanners();
+      renderAllViews();
+    });
+    $("btnDismissAutoDeduct").addEventListener("click", async () => {
+      await api("POST", "/api/auto-deduct/dismiss");
+      state.autoDeductNotice = null;
+      renderTopbarAndBanners();
     });
 
     // Finished job banner actions
@@ -1998,6 +2035,7 @@
           safetyBufferPct: Number($("cfgSafetyPct").value || 5),
           autoConnect: $("cfgAutoConnect").checked,
           autoSyncRfid: $("cfgAutoSyncRfid").checked,
+          autoDeductOnFinish: $("cfgAutoDeduct").checked,
           connectNow: mode === "cloud"
             ? !!($("cfgCloudToken").value.trim() && $("cfgPrinterSerial").value.trim())
             : !!($("cfgPrinterIp").value.trim() && $("cfgPrinterSerial").value.trim() && $("cfgAccessCode").value.trim())

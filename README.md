@@ -22,6 +22,7 @@ A zero-install Windows web dashboard for tracking filament usage across multiple
 - **Zero-Install Windows Runtime:** Runs locally using built-in Windows PowerShell, .NET, and `curl.exe` — no Python, Node.js, or external packages required.
 - **Multi-AMS 2 Pro & AMS HT Support:** Tracks multiple 4-slot **AMS 2 Pro** units (`A1–A4`, `B1–B4`, etc.), single-slot **AMS HT** units (`HT-1+`, `ams_id` `128+`), and an **External Spool**.
 - **Full Non-RFID & RFID AMS Reading:** Reads live AMS temperature, humidity, active drying countdowns, loaded vs. empty slots, material, exact hex color, decoded Bambu filament profiles (`GFA00`, `GFL99`, etc.), nozzle temp ranges, and active-in-nozzle status (`tray_now`) over local MQTT — even for non-RFID third-party spools.
+- **Hands-Free Auto-Deduct on Print Finish:** Automatically detects when your P2S finishes (or stops) a print via MQTT, pulls the matching `.gcode.3mf` from P2S USB FTPS (or local Bambu Studio cache fallback), matches each filament to its AMS 2 Pro / AMS HT slot, deducts exact grams (scaled proportionally if cancelled early), and updates totals with zero input—even if your browser tab is closed (with 1-click **Undo** in the confirmation banner or Print History).
 - **Last Print Usage Measurement:**
   - Pull `.gcode.3mf` files directly from your P2S **External USB** drive over FTPS (`port 990`).
   - Pull sliced plates directly from your local **Bambu Studio** / **OrcaSlicer** cache (**From Bambu Studio**).
