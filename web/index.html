@@ -145,12 +145,49 @@
             <span class="kpi-chip drying hidden" id="kpiDryingChip" title="Active AMS drying cycles">
               <span id="kpiDryingCount">Drying</span>
             </span>
+            <button class="btn btn-secondary btn-xs" id="btnToggleLiveView" title="Show/hide live chamber camera view">📷 Live View</button>
           </div>
         </div>
 
         <!-- Collapsible Last Print Details Drawer (hidden by default to keep monitor clean) -->
         <div class="card last-details-drawer hidden" id="lastDetailsDrawer">
           <div class="last-print-body" id="heroLastBody"></div>
+        </div>
+
+        <!-- Collapsible Live Chamber Camera Drawer (hidden by default, stops stream automatically when closed) -->
+        <div class="card live-cam-card hidden" id="liveCamDrawer">
+          <div class="live-cam-head">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span class="cam-live-badge" id="camLiveBadge">IDLE</span>
+              <strong>P2S Chamber Live View</strong>
+              <span class="muted small mono" id="camMetaText">Connecting...</span>
+            </div>
+            <div class="btn-row">
+              <select id="camFpsSelect" style="width:auto;padding:4px 8px;font-size:12px;" title="Live view refresh rate">
+                <option value="500">2 fps</option>
+                <option value="200" selected>5 fps</option>
+                <option value="125">8 fps</option>
+              </select>
+              <button class="btn btn-ghost btn-xs" id="btnCamLight" title="Toggle P2S chamber light">💡 Light</button>
+              <button class="btn btn-ghost btn-xs" id="btnCamSnapshot" title="Save snapshot JPEG">⬇ Snapshot</button>
+              <button class="btn btn-ghost btn-xs" id="btnCamFullscreen" title="Fullscreen camera">⛶</button>
+              <button class="btn btn-ghost btn-xs" id="btnCamRetry" title="Reconnect camera">↻</button>
+              <button class="btn btn-ghost btn-xs" id="btnCamClose" title="Hide camera &amp; stop stream">&times;</button>
+            </div>
+          </div>
+
+          <div class="live-cam-stage" id="liveCamStage">
+            <img id="camImg" class="live-cam-img hidden" alt="Bambu P2S Live View" />
+            <div class="live-cam-placeholder" id="camPlaceholder">
+              <div id="camStatusTitle" style="font-weight:700;font-size:15px;">Starting camera stream...</div>
+              <div id="camStatusError" class="muted small" style="max-width:560px;margin-top:6px;"></div>
+              <button class="btn btn-primary btn-xs hidden" id="btnCamRetryMain" style="margin-top:12px;">Retry Camera</button>
+            </div>
+            <div class="live-cam-overlay hidden" id="camOverlayHud">
+              <span class="mono" id="camOverlayJob"></span>
+              <span class="mono" id="camOverlayTemps"></span>
+            </div>
+          </div>
         </div>
 
         <!-- Multi-AMS Visual Rack (Front and Center) -->

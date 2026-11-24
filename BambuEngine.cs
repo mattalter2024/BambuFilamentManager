@@ -2609,4 +2609,496 @@ namespace BambuFilamentManager
             Stop();
         }
     }
+
+    public class CameraStatus
+    {
+        public bool Running { get; set; }
+        public bool Connected { get; set; }
+        public string Mode { get; set; } // "rtsps", "p1-jpeg", "idle"
+        public bool HasFfmpeg { get; set; }
+        public string FfmpegPath { get; set; }
+        public bool Port322Open { get; set; }
+        public bool Port6000Open { get; set; }
+        public int FrameCount { get; set; }
+        public double Fps { get; set; }
+        public string LastFrameUtc { get; set; }
+        public string StatusMessage { get; set; }
+        public string Error { get; set; }
+        public bool NeedsLiveviewToggle { get; set; }
+
+        public CameraStatus()
+        {
+            Mode = "idle";
+            StatusMessage = "Camera off";
+        }
+    }
+
+    public class BambuCameraStreamer : IDisposable
+    {
+        private readonly object _lock = new object();
+        private volatile bool _running;
+        private Thread _worker;
+        private Process _ffmpegProc;
+        private TcpClient _tcp;
+        private SslStream _ssl;
+
+        private string _ip;
+        private string _accessCode;
+        private byte[] _latestFrame;
+        private DateTime _lastClientTouchUtc = DateTime.UtcNow;
+        private DateTime _fpsWindowStart = DateTime.UtcNow;
+        private int _fpsWindowFrames = 0;
+
+        private CameraStatus _status = new CameraStatus();
+
+        public static string FindFfmpegPath()
+        {
+            try
+            {
+                // 1. Check PATH via where.exe
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "where.exe",
+                    Arguments = "ffmpeg.exe",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string outStr = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(3000);
+                    foreach (var line in outStr.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        string cand = line.Trim();
+                        if (File.Exists(cand)) return cand;
+                    }
+                }
+            }
+            catch { }
+
+            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string[] directCandidates = new[]
+            {
+                Path.Combine(localApp, @"Microsoft\WinGet\Links\ffmpeg.exe"),
+                @"C:\ffmpeg\bin\ffmpeg.exe",
+                @"C:\Program Files\ffmpeg\bin\ffmpeg.exe"
+            };
+            foreach (var c in directCandidates)
+            {
+                if (File.Exists(c)) return c;
+            }
+
+            try
+            {
+                string wingetPkgs = Path.Combine(localApp, @"Microsoft\WinGet\Packages");
+                if (Directory.Exists(wingetPkgs))
+                {
+                    foreach (var dir in Directory.GetDirectories(wingetPkgs, "*FFmpeg*"))
+                    {
+                        var found = Directory.GetFiles(dir, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();
+                        if (!string.IsNullOrEmpty(found)) return found;
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static bool ProbeTcpPort(string ip, int port, int timeoutMs)
+        {
+            if (string.IsNullOrWhiteSpace(ip)) return false;
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var ar = client.BeginConnect(ip, port, null, null);
+                    bool ok = ar.AsyncWaitHandle.WaitOne(timeoutMs, false);
+                    if (ok && client.Connected)
+                    {
+                        client.EndConnect(ar);
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public CameraStatus Start(string ip, string accessCode)
+        {
+            Stop();
+            _ip = (ip ?? "").Trim();
+            _accessCode = (accessCode ?? "").Trim();
+            _lastClientTouchUtc = DateTime.UtcNow;
+
+            string ffmpegPath = FindFfmpegPath();
+            bool p322 = ProbeTcpPort(_ip, 322, 1400);
+            bool p6000 = !p322 && ProbeTcpPort(_ip, 6000, 1400);
+
+            lock (_lock)
+            {
+                _latestFrame = null;
+                _status = new CameraStatus
+                {
+                    Running = false,
+                    Connected = false,
+                    HasFfmpeg = !string.IsNullOrEmpty(ffmpegPath),
+                    FfmpegPath = ffmpegPath ?? "",
+                    Port322Open = p322,
+                    Port6000Open = p6000,
+                    FrameCount = 0,
+                    Fps = 0
+                };
+            }
+
+            if (string.IsNullOrWhiteSpace(_ip) || string.IsNullOrWhiteSpace(_accessCode))
+            {
+                lock (_lock)
+                {
+                    _status.Error = "Printer LAN IP and Access Code are required for Live View.";
+                    _status.StatusMessage = "Not configured";
+                }
+                return GetStatus();
+            }
+
+            if (p322)
+            {
+                if (string.IsNullOrEmpty(ffmpegPath))
+                {
+                    lock (_lock)
+                    {
+                        _status.Mode = "rtsps";
+                        _status.StatusMessage = "FFmpeg not found";
+                        _status.Error = "RTSPS port 322 is open on your printer, but ffmpeg.exe was not found. Install FFmpeg (winget install Gyan.FFmpeg.Essentials) and restart the app.";
+                    }
+                    return GetStatus();
+                }
+
+                _running = true;
+                lock (_lock)
+                {
+                    _status.Running = true;
+                    _status.Mode = "rtsps";
+                    _status.StatusMessage = "Connecting to RTSPS camera (" + _ip + ":322)...";
+                }
+                _worker = new Thread(() => RunFfmpegRtspLoop(ffmpegPath)) { IsBackground = true, Name = "BambuCamRtsp" };
+                _worker.Start();
+            }
+            else if (p6000)
+            {
+                _running = true;
+                lock (_lock)
+                {
+                    _status.Running = true;
+                    _status.Mode = "p1-jpeg";
+                    _status.StatusMessage = "Connecting to camera (" + _ip + ":6000)...";
+                }
+                _worker = new Thread(RunPort6000Loop) { IsBackground = true, Name = "BambuCam6000" };
+                _worker.Start();
+            }
+            else
+            {
+                lock (_lock)
+                {
+                    _status.NeedsLiveviewToggle = true;
+                    _status.StatusMessage = "Camera stream not enabled";
+                    _status.Error = "Could not reach RTSPS port 322 on " + _ip + ". On your Bambu Lab P2S touchscreen, enable LAN Mode Liveview (Settings -> LAN Only Mode / Camera -> LAN Mode Liveview) and click Retry.";
+                }
+            }
+
+            return GetStatus();
+        }
+
+        public void Stop()
+        {
+            _running = false;
+            KillHandles();
+            if (_worker != null && _worker.IsAlive)
+            {
+                try { _worker.Join(1200); } catch { }
+            }
+            lock (_lock)
+            {
+                _status.Running = false;
+                _status.Connected = false;
+                _status.Fps = 0;
+                if (string.IsNullOrEmpty(_status.Error)) _status.StatusMessage = "Camera stopped";
+            }
+        }
+
+        public void CheckIdleTimeout(int idleSeconds)
+        {
+            if (_running && (DateTime.UtcNow - _lastClientTouchUtc).TotalSeconds > idleSeconds)
+            {
+                Stop();
+            }
+        }
+
+        public byte[] GetLatestFrame()
+        {
+            _lastClientTouchUtc = DateTime.UtcNow;
+            lock (_lock)
+            {
+                return _latestFrame;
+            }
+        }
+
+        public CameraStatus GetStatus()
+        {
+            lock (_lock)
+            {
+                return new CameraStatus
+                {
+                    Running = _status.Running,
+                    Connected = _status.Connected,
+                    Mode = _status.Mode,
+                    HasFfmpeg = _status.HasFfmpeg,
+                    FfmpegPath = _status.FfmpegPath,
+                    Port322Open = _status.Port322Open,
+                    Port6000Open = _status.Port6000Open,
+                    FrameCount = _status.FrameCount,
+                    Fps = Math.Round(_status.Fps, 1),
+                    LastFrameUtc = _status.LastFrameUtc,
+                    StatusMessage = _status.StatusMessage,
+                    Error = _status.Error,
+                    NeedsLiveviewToggle = _status.NeedsLiveviewToggle
+                };
+            }
+        }
+
+        private void KillHandles()
+        {
+            try { if (_ffmpegProc != null && !_ffmpegProc.HasExited) _ffmpegProc.Kill(); } catch { }
+            try { if (_ffmpegProc != null) _ffmpegProc.Dispose(); } catch { }
+            _ffmpegProc = null;
+            try { if (_ssl != null) _ssl.Close(); } catch { }
+            try { if (_tcp != null) _tcp.Close(); } catch { }
+            _ssl = null;
+            _tcp = null;
+        }
+
+        private void PublishFrame(byte[] jpegBytes)
+        {
+            var now = DateTime.UtcNow;
+            lock (_lock)
+            {
+                _latestFrame = jpegBytes;
+                _status.Connected = true;
+                _status.Error = null;
+                _status.NeedsLiveviewToggle = false;
+                _status.FrameCount++;
+                _status.LastFrameUtc = now.ToString("o");
+                _status.StatusMessage = "Live (" + _status.Mode.ToUpperInvariant() + ")";
+
+                _fpsWindowFrames++;
+                double elapsed = (now - _fpsWindowStart).TotalSeconds;
+                if (elapsed >= 1.5)
+                {
+                    _status.Fps = _fpsWindowFrames / elapsed;
+                    _fpsWindowFrames = 0;
+                    _fpsWindowStart = now;
+                }
+            }
+        }
+
+        private void RunFfmpegRtspLoop(string ffmpegPath)
+        {
+            string url = string.Format("rtsps://bblp:{0}@{1}:322/streaming/live/1",
+                Uri.EscapeDataString(_accessCode), _ip);
+
+            while (_running)
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = ffmpegPath,
+                        Arguments = string.Format(
+                            "-hide_banner -loglevel warning -rtsp_transport tcp -tls_verify 0 -fflags nobuffer -flags low_delay -i \"{0}\" -vf scale=1280:-2 -r 8 -f image2pipe -vcodec mjpeg -q:v 5 -",
+                            url),
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
+
+                    _ffmpegProc = Process.Start(psi);
+                    var errLines = new StringBuilder();
+                    var errThread = new Thread(() =>
+                    {
+                        try
+                        {
+                            string line;
+                            while (_ffmpegProc != null && (line = _ffmpegProc.StandardError.ReadLine()) != null)
+                            {
+                                if (errLines.Length < 1000) errLines.AppendLine(line);
+                            }
+                        }
+                        catch { }
+                    }) { IsBackground = true };
+                    errThread.Start();
+
+                    // Parse continuous JPEG SOI (FF D8) ... EOI (FF D9) stream from ffmpeg stdout
+                    Stream stdout = _ffmpegProc.StandardOutput.BaseStream;
+                    byte[] chunk = new byte[16384];
+                    var frameBuf = new MemoryStream(65536);
+                    bool inFrame = false;
+                    int prev = -1;
+
+                    while (_running)
+                    {
+                        int n = stdout.Read(chunk, 0, chunk.Length);
+                        if (n <= 0) break;
+
+                        for (int i = 0; i < n; i++)
+                        {
+                            byte b = chunk[i];
+                            if (!inFrame)
+                            {
+                                if (prev == 0xFF && b == 0xD8)
+                                {
+                                    frameBuf.SetLength(0);
+                                    frameBuf.WriteByte(0xFF);
+                                    frameBuf.WriteByte(0xD8);
+                                    inFrame = true;
+                                }
+                            }
+                            else
+                            {
+                                frameBuf.WriteByte(b);
+                                if (prev == 0xFF && b == 0xD9)
+                                {
+                                    if (frameBuf.Length > 512)
+                                    {
+                                        PublishFrame(frameBuf.ToArray());
+                                    }
+                                    inFrame = false;
+                                    frameBuf.SetLength(0);
+                                }
+                                else if (frameBuf.Length > 4 * 1024 * 1024)
+                                {
+                                    inFrame = false;
+                                    frameBuf.SetLength(0);
+                                }
+                            }
+                            prev = b;
+                        }
+                    }
+
+                    if (_running)
+                    {
+                        string eMsg = errLines.ToString().Trim();
+                        lock (_lock)
+                        {
+                            _status.Connected = false;
+                            _status.Error = string.IsNullOrWhiteSpace(eMsg) ? "RTSPS stream ended — reconnecting..." : eMsg;
+                            _status.StatusMessage = "Reconnecting...";
+                        }
+                        KillHandles();
+                        Thread.Sleep(2500);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (_lock)
+                    {
+                        _status.Connected = false;
+                        _status.Error = ex.Message;
+                        _status.StatusMessage = "Camera error";
+                    }
+                    KillHandles();
+                    if (_running) Thread.Sleep(3000);
+                }
+            }
+            KillHandles();
+        }
+
+        private void RunPort6000Loop()
+        {
+            try
+            {
+                _tcp = new TcpClient();
+                var ar = _tcp.BeginConnect(_ip, 6000, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(4000)) throw new TimeoutException("Timed out connecting to port 6000.");
+                _tcp.EndConnect(ar);
+                _tcp.ReceiveTimeout = 6000;
+                _tcp.SendTimeout = 5000;
+
+                _ssl = new SslStream(_tcp.GetStream(), false, (s, c, ch, err) => true);
+                _ssl.AuthenticateAsClient(_ip, null, SslProtocols.Tls12, false);
+
+                byte[] auth = new byte[80];
+                Buffer.BlockCopy(BitConverter.GetBytes((uint)0x40), 0, auth, 0, 4);
+                Buffer.BlockCopy(BitConverter.GetBytes((uint)0x3000), 0, auth, 4, 4);
+                byte[] uBytes = Encoding.ASCII.GetBytes("bblp");
+                byte[] pBytes = Encoding.ASCII.GetBytes(_accessCode);
+                Buffer.BlockCopy(uBytes, 0, auth, 16, Math.Min(32, uBytes.Length));
+                Buffer.BlockCopy(pBytes, 0, auth, 48, Math.Min(32, pBytes.Length));
+                _ssl.Write(auth, 0, 80);
+                _ssl.Flush();
+
+                while (_running)
+                {
+                    byte[] hdr = ReadExact(_ssl, 16);
+                    uint len = BitConverter.ToUInt32(hdr, 0);
+                    if (len < 128 || len > 5 * 1024 * 1024)
+                    {
+                        // P2S / X1C / H2D return a small non-JPEG status packet on port 6000 because they stream via RTSPS port 322!
+                        lock (_lock)
+                        {
+                            _status.Running = false;
+                            _status.Connected = false;
+                            _status.NeedsLiveviewToggle = true;
+                            _status.StatusMessage = "Enable LAN Mode Liveview on P2S";
+                            _status.Error = "Your P2S uses RTSPS (port 322) rather than P1S JPEG streaming (port 6000), and port 322 is currently closed. On your P2S touchscreen, turn on LAN Mode Liveview (Settings -> LAN Only Mode -> LAN Mode Liveview) and click Retry.";
+                        }
+                        _running = false;
+                        break;
+                    }
+
+                    byte[] jpg = ReadExact(_ssl, (int)len);
+                    if (jpg.Length > 4 && jpg[0] == 0xFF && jpg[1] == 0xD8)
+                    {
+                        PublishFrame(jpg);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (_lock)
+                {
+                    _status.Running = false;
+                    _status.Connected = false;
+                    _status.NeedsLiveviewToggle = true;
+                    _status.StatusMessage = "Enable LAN Mode Liveview on P2S";
+                    _status.Error = "Camera port 6000 closed (" + ex.Message + "). On your Bambu Lab P2S, enable LAN Mode Liveview on the touchscreen to open RTSPS port 322.";
+                }
+            }
+            finally
+            {
+                KillHandles();
+            }
+        }
+
+        private static byte[] ReadExact(Stream s, int count)
+        {
+            byte[] buf = new byte[count];
+            int rd = 0;
+            while (rd < count)
+            {
+                int n = s.Read(buf, rd, count - rd);
+                if (n <= 0) throw new IOException("EOF");
+                rd += n;
+            }
+            return buf;
+        }
+
+        public void Dispose()
+        {
+            Stop();
+        }
+    }
 }

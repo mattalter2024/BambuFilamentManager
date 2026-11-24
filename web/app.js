@@ -29,7 +29,12 @@
     cloudDevicesCache: [],
     lastShownCmdAt: "",
     autoDeductNotice: null,
-    lastToastAutoDeductId: ""
+    lastToastAutoDeductId: "",
+    camOpen: false,
+    camTimer: null,
+    camStatusTimer: null,
+    camFetching: false,
+    camLightOn: true
   };
 
   // ==================== UTILITIES ====================
@@ -295,6 +300,21 @@
       if (prBtn) prBtn.textContent = gState === "PAUSE" ? "▶ Resume Print" : "⏸ Pause Print";
     } else {
       liveBar.classList.add("hidden");
+    }
+
+    // Update Live View HUD overlay if camera is open
+    if (state.camOpen) {
+      const hud = $("camOverlayHud");
+      if (tel.Connected) {
+        hud.classList.remove("hidden");
+        const jobTxt = (gState === "RUNNING" || gState === "PAUSE" || gState === "PREPARE")
+          ? `${gState} · ${tel.SubtaskName || "Job"} · ${tel.McPercent || 0}% (L${tel.LayerNum || 0}/${tel.TotalLayerNum || 0})`
+          : `${gState || "IDLE"}`;
+        $("camOverlayJob").textContent = jobTxt;
+        $("camOverlayTemps").textContent = `N ${Math.round(tel.NozzleTemp || 0)}° · B ${Math.round(tel.BedTemp || 0)}° · C ${Math.round(tel.ChamberTemp || 0)}°`;
+      } else {
+        hud.classList.add("hidden");
+      }
     }
 
     // Surface printer command ack/rejection (e.g. "mqtt message verify failed")
@@ -1425,6 +1445,100 @@
     });
   }
 
+  // ==================== LIVE CAMERA VIEW ====================
+  function updateCamUiFromStatus(cam) {
+    if (!cam) return;
+    const badge = $("camLiveBadge");
+    const meta = $("camMetaText");
+    const title = $("camStatusTitle");
+    const errEl = $("camStatusError");
+    const retryBtn = $("btnCamRetryMain");
+
+    if (cam.Connected && cam.FrameCount > 0) {
+      badge.textContent = "LIVE";
+      badge.className = "cam-live-badge live";
+      meta.textContent = `${cam.Mode.toUpperCase()} · ${Number(cam.Fps || 0).toFixed(1)} fps`;
+      $("camImg").classList.remove("hidden");
+      $("camPlaceholder").classList.add("hidden");
+    } else {
+      badge.textContent = cam.Running ? "CONNECTING" : "OFF";
+      badge.className = "cam-live-badge";
+      meta.textContent = cam.StatusMessage || "Idle";
+      title.textContent = cam.StatusMessage || "Waiting for camera...";
+      errEl.textContent = cam.Error || "";
+      retryBtn.classList.toggle("hidden", !cam.Error && cam.Running);
+      if (!cam.Connected) {
+        $("camImg").classList.add("hidden");
+        $("camPlaceholder").classList.remove("hidden");
+      }
+    }
+  }
+
+  function scheduleCamFrameLoop() {
+    if (state.camTimer) clearInterval(state.camTimer);
+    if (!state.camOpen) return;
+    const intervalMs = Math.max(100, Number($("camFpsSelect")?.value || 200));
+    state.camTimer = setInterval(async () => {
+      if (!state.camOpen || state.camFetching || document.hidden) return;
+      state.camFetching = true;
+      try {
+        const res = await fetch("/api/camera/frame?t=" + Date.now(), { cache: "no-store" });
+        if (res.ok) {
+          const blob = await res.blob();
+          const img = $("camImg");
+          const prevUrl = img.dataset.blobUrl;
+          const nextUrl = URL.createObjectURL(blob);
+          img.src = nextUrl;
+          img.dataset.blobUrl = nextUrl;
+          if (prevUrl) URL.revokeObjectURL(prevUrl);
+          img.classList.remove("hidden");
+          $("camPlaceholder").classList.add("hidden");
+        }
+      } catch {}
+      finally { state.camFetching = false; }
+    }, intervalMs);
+  }
+
+  async function startLiveView() {
+    state.camOpen = true;
+    $("liveCamDrawer").classList.remove("hidden");
+    $("btnToggleLiveView").classList.add("btn-primary");
+    $("btnToggleLiveView").classList.remove("btn-secondary");
+    $("camStatusTitle").textContent = "Connecting to P2S camera...";
+    $("camStatusError").textContent = "";
+    $("camPlaceholder").classList.remove("hidden");
+    renderTopbarAndBanners();
+
+    try {
+      const res = await api("POST", "/api/camera/start");
+      updateCamUiFromStatus(res.camera);
+    } catch (err) {
+      $("camStatusTitle").textContent = "Camera unavailable";
+      $("camStatusError").textContent = err.message;
+      $("btnCamRetryMain").classList.remove("hidden");
+    }
+
+    scheduleCamFrameLoop();
+    if (state.camStatusTimer) clearInterval(state.camStatusTimer);
+    state.camStatusTimer = setInterval(async () => {
+      if (!state.camOpen) return;
+      try {
+        const res = await api("GET", "/api/camera/status");
+        updateCamUiFromStatus(res.camera);
+      } catch {}
+    }, 2000);
+  }
+
+  async function stopLiveView() {
+    state.camOpen = false;
+    if (state.camTimer) { clearInterval(state.camTimer); state.camTimer = null; }
+    if (state.camStatusTimer) { clearInterval(state.camStatusTimer); state.camStatusTimer = null; }
+    $("liveCamDrawer").classList.add("hidden");
+    $("btnToggleLiveView").classList.remove("btn-primary");
+    $("btnToggleLiveView").classList.add("btn-secondary");
+    try { await api("POST", "/api/camera/stop"); } catch {}
+  }
+
   // ==================== DROPDOWN MENUS ====================
   function closeAllMenus(exceptId = null) {
     document.querySelectorAll(".dropdown-menu").forEach(m => {
@@ -1461,6 +1575,40 @@
       const dr = $("lastDetailsDrawer");
       const open = dr.classList.toggle("hidden");
       $("btnToggleLastDetails").textContent = open ? "Details ▾" : "Hide ▴";
+    });
+
+    // Live View Camera Controls
+    $("btnToggleLiveView").addEventListener("click", () => {
+      if (state.camOpen) stopLiveView(); else startLiveView();
+    });
+    $("btnCamClose").addEventListener("click", stopLiveView);
+    $("btnCamRetry").addEventListener("click", startLiveView);
+    $("btnCamRetryMain").addEventListener("click", startLiveView);
+    $("camFpsSelect").addEventListener("change", scheduleCamFrameLoop);
+    $("btnCamFullscreen").addEventListener("click", () => {
+      const stage = $("liveCamStage");
+      if (document.fullscreenElement) document.exitFullscreen();
+      else if (stage.requestFullscreen) stage.requestFullscreen();
+    });
+    $("btnCamSnapshot").addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/camera/frame?t=" + Date.now());
+        if (!res.ok) { toast("No camera frame available yet.", "warn"); return; }
+        const blob = await res.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `p2s_snapshot_${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        toast("Saved camera snapshot.");
+      } catch (err) { toast(err.message, "error"); }
+    });
+    $("btnCamLight").addEventListener("click", async () => {
+      state.camLightOn = !state.camLightOn;
+      try {
+        const res = await api("POST", "/api/printer/light", { on: state.camLightOn });
+        toast(res.message);
+      } catch (err) { toast(err.message, "error"); }
     });
 
     // Tabs

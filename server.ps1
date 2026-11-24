@@ -33,7 +33,8 @@ Add-Type -Path $CsPath -ReferencedAssemblies @(
     "System.Web.Extensions"
 )
 
-$MqttClient = New-Object BambuFilamentManager.BambuMqttClient
+$MqttClient     = New-Object BambuFilamentManager.BambuMqttClient
+$CameraStreamer = New-Object BambuFilamentManager.BambuCameraStreamer
 
 # --- Helper: Build Default Realistic Sample Database (P2S + 2x AMS 2 Pro + 1x AMS HT) ---
 function New-SampleDatabase {
@@ -729,6 +730,7 @@ try {
                 if (-not [string]::IsNullOrWhiteSpace($bgSnap.LastFinishedJobId)) {
                     [void](Invoke-AutoDeductIfFinished $Db $bgSnap)
                 }
+                $CameraStreamer.CheckIdleTimeout(25)
             } catch {
                 Write-Warning "Background check error: $_"
             }
@@ -1134,6 +1136,37 @@ try {
                     Send-Json $res ([ordered]@{ ok = $true; action = $action; message = "Sent '$action' command to P2S." })
                 }
             }
+            elseif ($method -eq "POST" -and $path -eq "/api/printer/light") {
+                $body = Parse-JsonBody $req
+                $turnOn = [bool]$body["on"]
+                $lErr = $null
+                $okL = $MqttClient.SendChamberLight($turnOn, [ref]$lErr)
+                if (-not $okL) {
+                    Send-Json $res ([ordered]@{ ok = $false; error = $lErr }) 400
+                } else {
+                    Send-Json $res ([ordered]@{ ok = $true; on = $turnOn; message = $(if ($turnOn) { "Sent chamber light ON." } else { "Sent chamber light OFF." }) })
+                }
+            }
+            elseif ($method -eq "POST" -and $path -eq "/api/camera/start") {
+                $cfg = $Db["config"]
+                $camSt = $CameraStreamer.Start([string]$cfg["printerIp"], [string]$cfg["accessCode"])
+                Send-Json $res ([ordered]@{ ok = $true; camera = $camSt })
+            }
+            elseif ($method -eq "POST" -and $path -eq "/api/camera/stop") {
+                $CameraStreamer.Stop()
+                Send-Json $res ([ordered]@{ ok = $true; camera = $CameraStreamer.GetStatus() })
+            }
+            elseif ($method -eq "GET" -and $path -eq "/api/camera/status") {
+                Send-Json $res ([ordered]@{ ok = $true; camera = $CameraStreamer.GetStatus() })
+            }
+            elseif ($method -eq "GET" -and $path -eq "/api/camera/frame") {
+                $frameBytes = $CameraStreamer.GetLatestFrame()
+                if ($null -eq $frameBytes -or $frameBytes.Length -eq 0) {
+                    $res.SendResponse(404, "text/plain; charset=utf-8", [System.Text.Encoding]::UTF8.GetBytes("No frame yet"), "no-store")
+                } else {
+                    $res.SendResponse(200, "image/jpeg", $frameBytes, "no-store")
+                }
+            }
             elseif ($method -eq "POST" -and $path -eq "/api/ams/add") {
                 $body = Parse-JsonBody $req
                 $unitType = [string]$body["unitType"]
@@ -1373,6 +1406,7 @@ try {
 }
 finally {
     Write-Host "Shutting down..." -ForegroundColor Yellow
+    $CameraStreamer.Dispose()
     $MqttClient.Dispose()
     if ($Server) { $Server.Stop() }
 }
